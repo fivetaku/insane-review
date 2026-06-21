@@ -1,0 +1,10 @@
+# OMC 오케스트레이션 세션 상태(런타임 산출물 — 배포 대상 아님)
+.omc/
+**/.omc/
+
+# insane-review 실행 출력(프로젝트 .insane-review/ 에 저장되지만 혹시 모를 안전망)
+.insane-review/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
