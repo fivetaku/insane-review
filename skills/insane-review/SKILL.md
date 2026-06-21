@@ -9,11 +9,16 @@ description: GPT-5.5 Pro(웹 전용·API 없음)를 Claude Code 안에서 활용
 
 핵심 가치는 "통째 패킹"이 아니라 **"의도 파악 → 관련 타겟만 정밀 선별 → 그것만 패킹"** 이다. 이 선별을 Claude(너)가 수행하는 것이 이 도구의 차별점이다.
 
-## 선행 조건 (한 번 확인)
+## 선행 조건 — 선택지 기반 온보딩 (사용자에게 CLI 타이핑 금지)
 
-- Comet 또는 Chrome가 **디버그 포트(9222)로** 실행 + `chatgpt.com` 로그인. 이미 떠 있는데 포트가 없으면 **재시작 필요**(쿠키는 디스크 보존 → 로그인 유지). 스크립트가 자동 실행하지만, 이미 일반 모드로 떠 있으면 사용자에게 종료를 요청하라.
-- **모델을 5.5 Pro로** (스크립트 `--model pro`가 자동선택; 안되면 사용자가 1회 수동 설정하면 새 채팅이 상속).
-- `playwright`·`pyperclip`(pip), `npx`(repomix는 `npx -y`로 자동설치) 필요. **처음 쓸 땐 `python3 bin/pack_and_ask.py --check-env`로 점검**(부족하면 `--install`로 pip 의존성 자동설치). 브라우저 로그인·Pro 모델은 자동설치 불가 → 위 안내대로.
+**커맨드 Step 0이 이걸 자동화한다.** Claude가 `--check-env`를 직접 돌려 마지막 `STATUS node=… deps=… browser=… login=…`을
+파싱하고, 막힌 단계마다 **AskUserQuestion 선택지**로 물어본 뒤 Claude가 대신 실행한다(`--install`, 브라우저 실행, 재점검).
+초보자는 클릭만으로 따라온다.
+
+- **deps**(`playwright`·`pyperclip`): 없으면 "지금 자동 설치" 선택 → `--check-env --install`. (`npx`/repomix는 `npx -y`로 완전 자동.)
+- **browser**: Comet/Chrome가 디버그포트(9222)로 떠 있어야 함. 없으면 "Comet 자동 실행" 선택 → Claude가 `open -a Comet --args --remote-debugging-port=9222`. (쿠키는 디스크 보존 → 로그인 유지.)
+- **login**: `--check-env`의 로그인 프로브가 `login=no`면, "방금 연 브라우저에서 chatgpt.com 로그인 + GPT-5.5 Pro 선택" 후 "로그인 완료" 선택 → 재점검. **로그인은 자동 불가 → 반드시 사용자에게 요청**(에러로 끝내지 말 것).
+- **모델 5.5 Pro**: 스크립트 `--model pro`가 자동선택·검증(`--require-model "GPT-5.5"`). 안 되면 사용자가 1회 수동 설정하면 새 채팅이 상속.
 
 ## 핵심 절차 (검토/수정/리뷰 요청을 받았을 때)
 

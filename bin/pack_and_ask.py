@@ -248,46 +248,95 @@ def ensure_browser(browser: str) -> bool:
     return False
 
 
+def probe_login() -> str:
+    """브라우저(CDP) up + playwright 있을 때 ChatGPT 로그인 상태를 best-effort로 확인.
+    반환: 'ok' | 'no' | 'unknown'(프로브 불가/오류)."""
+    import importlib.util
+    if not (is_port_open(CDP_PORT) and cdp_browser_ok()):
+        return "unknown"
+    if not importlib.util.find_spec("playwright"):
+        return "unknown"
+    try:
+        from playwright.sync_api import sync_playwright as _spw
+        with _spw() as pw:
+            b = pw.chromium.connect_over_cdp(CDP_URL)
+            ctx = pick_context(b)
+            if ctx is None:
+                return "no"
+            page = ctx.new_page()
+            try:
+                page.goto(CHATGPT_URL, wait_until="load", timeout=30000)
+                time.sleep(2)
+                return "ok" if looks_logged_in(page) else "no"
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+    except Exception:
+        return "unknown"
+
+
 def check_env(do_install: bool = False) -> int:
-    """환경 점검 — node/npx, repomix, pyperclip, playwright, 브라우저 CDP."""
+    """환경 점검 — node/npx, repomix, pyperclip, playwright, CDP 브라우저, ChatGPT 로그인.
+    마지막에 'STATUS ...' 라인을 출력해 커맨드(AskUserQuestion 온보딩)가 분기에 파싱한다."""
     import importlib.util
     print("=== insane-review 환경 점검 ===")
     ok, issues = [], []
 
     npx, node = shutil.which("npx"), shutil.which("node")
-    if node and npx:
+    node_ok = bool(node and npx)
+    if node_ok:
         ok.append("node/npx 있음")
         ok.append(f"repomix: `npx -y repomix@{REPOMIX_VERSION or 'latest'}`로 자동 설치(사전설치 불필요)")
     else:
         issues.append(("node/npx 없음", "Node.js 설치: https://nodejs.org 또는 `brew install node`"))
 
+    # pip 의존성 — do_install이면 '로그인 프로브 전에' 먼저 설치(설치 후 프로브 가능)
+    if do_install:
+        for mod, pip in (("pyperclip", "pyperclip"), ("playwright", "playwright")):
+            if not importlib.util.find_spec(mod):
+                print(f"  [--install] pip install {pip} ...")
+                subprocess.run([sys.executable, "-m", "pip", "install", pip])
+        importlib.invalidate_caches()
+
+    deps_ok = True
     for mod, pip in (("pyperclip", "pyperclip"), ("playwright", "playwright")):
         if importlib.util.find_spec(mod):
             ok.append(f"python {mod} 있음")
         else:
-            issues.append((f"python {mod} 없음", f"pip install {pip}"))
+            issues.append((f"python {mod} 없음", f"pip install {pip} (또는 --install)"))
+            deps_ok = False
 
     if is_port_open(CDP_PORT) and cdp_browser_ok():
-        ok.append(f"CDP 브라우저({CDP_PORT}) 확인 — 로그인/모델(Pro)은 직접 확인")
+        browser_state = "ok"
+        ok.append(f"CDP 브라우저({CDP_PORT}) 확인")
     elif is_port_open(CDP_PORT):
+        browser_state = "wrong"
         issues.append((f"port {CDP_PORT}이 CDP 브라우저 아님", "다른 프로세스 종료 후 Comet/Chrome을 디버그포트로 실행"))
     else:
+        browser_state = "down"
         issues.append((f"브라우저 CDP({CDP_PORT}) 닫힘",
-                       f"Comet/Chrome을 --remote-debugging-port={CDP_PORT}로 실행 + chatgpt.com 로그인 + 모델 Pro"))
+                       f"Comet/Chrome을 --remote-debugging-port={CDP_PORT}로 실행"))
+
+    # ChatGPT 로그인 프로브(브라우저 up + deps 있을 때만)
+    login_state = "unknown"
+    if browser_state == "ok" and deps_ok:
+        login_state = probe_login()
+        if login_state == "ok":
+            ok.append("ChatGPT 로그인됨 (입력창/모델 어포던스 확인)")
+        elif login_state == "no":
+            issues.append(("ChatGPT 로그인 안 됨", "해당 브라우저에서 chatgpt.com 로그인 + GPT-5.5 Pro 선택"))
 
     for o in ok:
         print(f"  ✓ {o}")
     for name, hint in issues:
         print(f"  ✗ {name}\n      → {hint}")
 
-    if do_install:
-        for mod, pip in (("pyperclip", "pyperclip"), ("playwright", "playwright")):
-            if not importlib.util.find_spec(mod):
-                print(f"\n[--install] pip install {pip} ...")
-                subprocess.run([sys.executable, "-m", "pip", "install", pip])
-        print("  (브라우저/로그인은 자동설치 불가)")
-
-    print(f"\n결과: {len(ok)} OK / {len(issues)} 부족" + ("  — 전부 준비됨 ✅" if not issues else "  ⚠️"))
+    # 머신 파싱용 상태 라인 — 커맨드 온보딩이 어느 단계가 막혔는지 분기에 사용
+    print(f"\nSTATUS node={'ok' if node_ok else 'missing'} deps={'ok' if deps_ok else 'missing'} "
+          f"browser={browser_state} login={login_state}")
+    print(f"결과: {len(ok)} OK / {len(issues)} 부족" + ("  — 전부 준비됨 ✅" if not issues else "  ⚠️"))
     return len(issues)
 
 
