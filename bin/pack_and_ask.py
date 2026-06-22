@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import shutil
 import socket
@@ -46,11 +47,51 @@ COMET_PATH = os.environ.get("INSANE_REVIEW_COMET", "/Applications/Comet.app/Cont
 CHROME_PATH = os.environ.get("INSANE_REVIEW_CHROME", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 CDP_PORT = int(os.environ.get("INSANE_REVIEW_CDP_PORT", "9222"))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+# 전용(격리) 프로필 — 사용자 주 브라우저 세션과 분리. Chrome 136+는 '기본 프로필'에서
+# --remote-debugging-port를 정책적으로 무시하므로(쿠키 탈취 방지), 이 별도 user-data-dir이
+# 없으면 디버그 포트가 아예 안 열린다. 모든 OS 공통으로 전용 프로필을 쓴다.
+BROWSER_PROFILE_DIR = Path(os.environ.get(
+    "INSANE_REVIEW_PROFILE", str(Path.home() / ".insane-review" / "browser-profile")))
+# 선택한 브라우저를 영속화(재질문 방지) — 우선순위: --browser > env > config 저장값 > 첫 감지.
+CONFIG_PATH = Path(os.environ.get(
+    "INSANE_REVIEW_CONFIG", str(Path.home() / ".insane-review" / "config.json")))
 # repomix 버전 핀(재현성·공급망) — env로 갱신. 빈 문자열이면 latest.
 REPOMIX_VERSION = os.environ.get("INSANE_REVIEW_REPOMIX_VERSION", "1.15.0")
 REPOMIX_TIMEOUT = int(os.environ.get("INSANE_REVIEW_REPOMIX_TIMEOUT", "300"))
 
 CHATGPT_URL = "https://chatgpt.com/"
+
+
+def _guard_dialogs(ctx, page=None):
+    """Stop playwright's default dialog auto-dismiss from racing over CDP.
+
+    Over connect_over_cdp, any JS dialog (beforeunload/alert/confirm) on the
+    ChatGPT page triggers playwright's built-in auto-dismiss. Across CDP that
+    races the browser → `ProtocolError: No dialog is showing`, an UNCAUGHT
+    driver exception that crashes the run (100% CPU spin) before the prompt is
+    ever submitted. Registering our own handler disables the default and
+    swallows the race.
+    """
+    def _on_dialog(d):
+        try:
+            d.dismiss()
+        except Exception:
+            pass
+    def _attach(p):
+        try:
+            p.on("dialog", _on_dialog)
+        except Exception:
+            pass
+    try:
+        for p in (getattr(ctx, "pages", None) or []):
+            _attach(p)
+        ctx.on("page", _attach)   # cover future tabs/pages too
+    except Exception:
+        pass
+    if page is not None:
+        _attach(page)
+
+
 INPUT_SELECTORS = ["#prompt-textarea", 'div[contenteditable="true"]']
 FILE_INPUT_SELECTOR = 'input[type="file"]'
 COPY_BTN = 'button[data-testid="copy-turn-action-button"]'
@@ -224,20 +265,127 @@ def cdp_browser_ok() -> bool:
         return False
 
 
-def ensure_browser(browser: str) -> bool:
-    if is_port_open():
-        if cdp_browser_ok():
-            print(f"  ✓ CDP 브라우저 확인 (port {CDP_PORT})")
-            return True
-        print(f"  ❌ port {CDP_PORT}에 CDP 브라우저가 아닌 다른 프로세스가 떠 있음")
+# ---- 크로스플랫폼 브라우저 레지스트리 (mac / windows / linux) ----
+def host_os() -> str:
+    s = platform.system()
+    return "mac" if s == "Darwin" else "win" if s == "Windows" else "linux"
+
+
+# Arc은 CDP/멀티인스턴스가 불안정해 자동 목록에서 제외(사용자가 절대경로로 직접 지정은 가능).
+def _browser_registry() -> list[tuple[str, list[str]]]:
+    """[(표시이름, [후보 실행경로...])] — OS별. 절대경로는 존재검사, 비절대는 PATH(which)로 해석."""
+    osname = host_os()
+    home = Path.home()
+    if osname == "mac":
+        A = "/Applications"
+        return [
+            ("Chrome",   [f"{A}/Google Chrome.app/Contents/MacOS/Google Chrome"]),
+            ("Comet",    [f"{A}/Comet.app/Contents/MacOS/Comet"]),
+            ("Brave",    [f"{A}/Brave Browser.app/Contents/MacOS/Brave Browser"]),
+            ("Edge",     [f"{A}/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]),
+            ("Chromium", [f"{A}/Chromium.app/Contents/MacOS/Chromium"]),
+            ("Vivaldi",  [f"{A}/Vivaldi.app/Contents/MacOS/Vivaldi"]),
+        ]
+    if osname == "win":
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        pfx = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        lad = os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
+        return [
+            ("Chrome",   [rf"{pf}\Google\Chrome\Application\chrome.exe",
+                          rf"{pfx}\Google\Chrome\Application\chrome.exe",
+                          rf"{lad}\Google\Chrome\Application\chrome.exe"]),
+            ("Edge",     [rf"{pf}\Microsoft\Edge\Application\msedge.exe",
+                          rf"{pfx}\Microsoft\Edge\Application\msedge.exe"]),
+            ("Brave",    [rf"{pf}\BraveSoftware\Brave-Browser\Application\brave.exe",
+                          rf"{pfx}\BraveSoftware\Brave-Browser\Application\brave.exe",
+                          rf"{lad}\BraveSoftware\Brave-Browser\Application\brave.exe"]),
+            ("Chromium", [rf"{lad}\Chromium\Application\chrome.exe"]),
+            ("Vivaldi",  [rf"{lad}\Vivaldi\Application\vivaldi.exe"]),
+        ]
+    return [  # linux
+        ("Chrome",   ["google-chrome", "google-chrome-stable"]),
+        ("Chromium", ["chromium", "chromium-browser"]),
+        ("Brave",    ["brave-browser", "brave"]),
+        ("Edge",     ["microsoft-edge", "microsoft-edge-stable"]),
+        ("Vivaldi",  ["vivaldi", "vivaldi-stable"]),
+    ]
+
+
+def detect_browsers() -> list[tuple[str, str]]:
+    """이 OS에 설치된 크로미움 계열 브라우저 [(이름, 실행경로)]. env 경로 오버라이드도 우선 반영."""
+    found, seen = [], set()
+    for env, nm in (("INSANE_REVIEW_BROWSER_PATH", None),
+                    ("INSANE_REVIEW_CHROME", "Chrome"), ("INSANE_REVIEW_COMET", "Comet")):
+        p = os.environ.get(env)
+        if p and Path(p).exists():
+            name = nm or Path(p).stem
+            if name.lower() not in seen:
+                found.append((name, p)); seen.add(name.lower())
+    for name, cands in _browser_registry():
+        if name.lower() in seen:
+            continue
+        for c in cands:
+            p = c if os.path.isabs(c) else (shutil.which(c) or "")
+            if p and Path(p).exists():
+                found.append((name, p)); seen.add(name.lower())
+                break
+    return found
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_browser_choice(name_or_path: str) -> None:
+    """선택한 브라우저(이름 또는 경로)를 config에 영속화 → 다음 실행부터 재질문 안 함."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cfg = _load_config()
+        cfg["browser"] = name_or_path
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, CONFIG_PATH)
+    except Exception:
+        pass
+
+
+def resolve_browser(name_or_path: str | None) -> tuple[str, str] | None:
+    """--browser 값(이름 'chrome' 또는 절대경로)을 (이름, 경로)로 해석.
+    인자 없으면 config 저장값 → 첫 감지 브라우저 순. 못 찾으면 None."""
+    if name_or_path:
+        if os.path.isabs(name_or_path) and Path(name_or_path).exists():
+            return (Path(name_or_path).stem, name_or_path)
+        for name, path in detect_browsers():
+            if name.lower() == name_or_path.lower():
+                return (name, path)
+        return None
+    saved = _load_config().get("browser")
+    if saved:
+        r = resolve_browser(saved)
+        if r:
+            return r
+    bs = detect_browsers()
+    return bs[0] if bs else None
+
+
+def launch_browser_exe(path: str) -> bool:
+    """전용 프로필 + 디버그 포트로 크로미움 직접 실행(크로스플랫폼) 후 CDP가 뜰 때까지 대기."""
+    try:
+        BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    cmd = [path, f"--remote-debugging-port={CDP_PORT}",
+           f"--user-data-dir={BROWSER_PROFILE_DIR}",
+           "--no-first-run", "--no-default-browser-check"]
+    print(f"  브라우저 시작: {Path(path).name} (CDP {CDP_PORT}, 전용 프로필)")
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        print(f"  ❌ 실행 실패: {str(exc)[:80]}")
         return False
-    path = COMET_PATH if browser == "comet" else CHROME_PATH
-    if not Path(path).exists():
-        print(f"  ❌ 브라우저 미설치: {path} (env INSANE_REVIEW_{browser.upper()}로 경로 지정 가능)")
-        return False
-    print(f"  {browser} 시작 중 (CDP {CDP_PORT})...")
-    subprocess.Popen([path, f"--remote-debugging-port={CDP_PORT}"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for i in range(30):
         if is_port_open() and cdp_browser_ok():
             print(f"  ✓ 시작 완료 ({i + 1}s)")
@@ -246,6 +394,22 @@ def ensure_browser(browser: str) -> bool:
         time.sleep(1)
     print("  ❌ 브라우저 시작 타임아웃")
     return False
+
+
+def ensure_browser(browser_arg: str | None) -> bool:
+    """이미 CDP가 떠 있으면 그걸 검증·사용, 아니면 지정/감지된 브라우저를 전용 프로필로 띄운다."""
+    if is_port_open():
+        if cdp_browser_ok():
+            print(f"  ✓ CDP 브라우저 확인 (port {CDP_PORT})")
+            return True
+        print(f"  ❌ port {CDP_PORT}에 CDP 브라우저가 아닌 다른 프로세스가 떠 있음")
+        return False
+    resolved = resolve_browser(browser_arg)
+    if not resolved:
+        avail = ", ".join(n for n, _ in detect_browsers()) or "없음"
+        print(f"  ❌ 사용할 브라우저를 찾지 못함 (지정='{browser_arg}', 설치감지=[{avail}])")
+        return False
+    return launch_browser_exe(resolved[1])
 
 
 def probe_login() -> str:
@@ -264,6 +428,7 @@ def probe_login() -> str:
             if ctx is None:
                 return "no"
             page = ctx.new_page()
+            _guard_dialogs(ctx, page)
             try:
                 page.goto(CHATGPT_URL, wait_until="load", timeout=30000)
                 time.sleep(2)
@@ -313,11 +478,11 @@ def check_env(do_install: bool = False) -> int:
         ok.append(f"CDP 브라우저({CDP_PORT}) 확인")
     elif is_port_open(CDP_PORT):
         browser_state = "wrong"
-        issues.append((f"port {CDP_PORT}이 CDP 브라우저 아님", "다른 프로세스 종료 후 Comet/Chrome을 디버그포트로 실행"))
+        issues.append((f"port {CDP_PORT}이 CDP 브라우저 아님", "다른 프로세스 종료 후 --launch-browser로 전용 프로필 실행"))
     else:
         browser_state = "down"
         issues.append((f"브라우저 CDP({CDP_PORT}) 닫힘",
-                       f"Comet/Chrome을 --remote-debugging-port={CDP_PORT}로 실행"))
+                       "전용 브라우저를 디버그포트+전용프로필로 실행(--launch-browser; 아래 BROWSERS 참고)"))
 
     # ChatGPT 로그인 프로브(브라우저 up + deps 있을 때만)
     login_state = "unknown"
@@ -335,7 +500,10 @@ def check_env(do_install: bool = False) -> int:
 
     # 머신 파싱용 상태 라인 — 커맨드 온보딩이 어느 단계가 막혔는지 분기에 사용
     print(f"\nSTATUS node={'ok' if node_ok else 'missing'} deps={'ok' if deps_ok else 'missing'} "
-          f"browser={browser_state} login={login_state}")
+          f"browser={browser_state} login={login_state} os={host_os()}")
+    # 설치된 크로미움 목록 — 커맨드가 브라우저 선택 AskUserQuestion을 구성하는 데 사용
+    bs = detect_browsers()
+    print("BROWSERS " + ",".join(n for n, _ in bs))
     print(f"결과: {len(ok)} OK / {len(issues)} 부족" + ("  — 전부 준비됨 ✅" if not issues else "  ⚠️"))
     return len(issues)
 
@@ -430,7 +598,7 @@ def copy_last_turn(page, base_copy: int = 0) -> str | None:
             time.sleep(1)
             txt = pyperclip.paste()
             # sentinel이 그대로면 복사 실패 → stale 반환 방지
-            if txt and txt != "__INSANE_REVIEW_SENTINEL__" and len(txt) > 10:
+            if txt and txt != "__INSANE_REVIEW_SENTINEL__" and txt.strip():
                 return txt
             time.sleep(0.5)
         return None
@@ -652,11 +820,11 @@ def put_text(page, message: str):
             if (el) { el.scrollIntoView({block:'center'}); el.focus(); } }"""
     )
     time.sleep(0.3)
-    if pyperclip is not None:
-        pyperclip.copy(message)
-        time.sleep(0.2)
-        page.keyboard.press("Meta+v")
-    else:
+    # 크로스플랫폼: OS 클립보드/⌘V(맥 전용) 대신 Playwright 네이티브 insert_text(insertText 이벤트).
+    # → mac/win/linux 동일 동작 + 동시 실행 시 클립보드 경합 제거. 실패 시 키 입력 폴백.
+    try:
+        page.keyboard.insert_text(message)
+    except Exception:
         page.keyboard.type(message)
     time.sleep(0.6)
 
@@ -819,7 +987,7 @@ def wait_for_turn_response(page, force_after=None, max_wait=None,
 
         # 완료 신호 + 텍스트 안정성 (새 assistant 턴이 실제로 생겼을 때만 완료로 인정)
         cur = last_assistant_text(page)
-        if not last_turn_complete(page, base_assistant=base_assistant, base_copy=base_copy) or len(cur) < 30:
+        if not last_turn_complete(page, base_assistant=base_assistant, base_copy=base_copy) or not cur.strip():
             stable_since = None
             time.sleep(2)
             continue
@@ -831,10 +999,10 @@ def wait_for_turn_response(page, force_after=None, max_wait=None,
         if stable_since and (time.monotonic() - stable_since) >= STABLE_CHECK_SECS:
             # 회수: copy 우선, 실패 시 DOM
             txt = copy_last_turn(page, base_copy=base_copy)
-            if txt and len(txt) > 30:
+            if txt and txt.strip():
                 print(f"    ✅ 응답 수신: {len(txt)}자 ({int(time.monotonic()-start)}s, copy)")
                 return ("ok", txt)
-            if cur and len(cur) > 30:
+            if cur and cur.strip():
                 print(f"    ✅ 응답 수신: {len(cur)}자 ({int(time.monotonic()-start)}s, DOM)")
                 return ("ok", cur)
         time.sleep(2)
@@ -1046,7 +1214,13 @@ def main():
                     help="N초 후 리즈닝 중이면 '지금 답변 받기' 재시도")
     ap.add_argument("--max-wait", type=int, default=None,
                     help=f"응답 최대 대기 초(기본 {MAX_WAIT_SECS}=20분; env INSANE_REVIEW_MAX_WAIT로도 설정)")
-    ap.add_argument("--browser", default="comet", choices=["comet", "chrome"])
+    ap.add_argument("--browser", default=None,
+                    help="자동화에 쓸 브라우저(이름: chrome/comet/brave/edge/chromium/vivaldi 또는 절대경로). "
+                         "생략 시 config 저장값 → 첫 감지 브라우저. 항상 전용 프로필로 실행")
+    ap.add_argument("--list-browsers", action="store_true",
+                    help="이 OS에 설치된 크로미움 계열 브라우저 목록 출력(BROWSERS 라인)")
+    ap.add_argument("--launch-browser", default=None, metavar="NAME|PATH",
+                    help="지정 브라우저를 전용 프로필+디버그포트로 실행(빈 문자열이면 자동 선택). 성공 시 config에 저장")
     ap.add_argument("--project", default=None,
                     help="채팅을 묶을 ChatGPT 프로젝트 이름(기본: 현재 폴더명). 폴더별로 채팅이 프로젝트 안에 정리됨")
     ap.add_argument("--no-project", action="store_true",
@@ -1066,6 +1240,27 @@ def main():
 
     if args.check_env:
         sys.exit(check_env(do_install=args.install))
+
+    if args.list_browsers:
+        bs = detect_browsers()
+        print("BROWSERS " + ",".join(f"{n}={p}" for n, p in bs))
+        for n, p in bs:
+            print(f"  • {n}: {p}")
+        if not bs:
+            print("  (설치된 크로미움 계열 브라우저를 찾지 못함)")
+        sys.exit(0)
+
+    if args.launch_browser is not None:
+        resolved = resolve_browser(args.launch_browser or None)
+        if not resolved:
+            avail = ", ".join(n for n, _ in detect_browsers()) or "없음"
+            sys.exit(f"❌ 브라우저를 찾지 못함 (지정='{args.launch_browser}', 감지=[{avail}])")
+        name, path = resolved
+        if launch_browser_exe(path):
+            save_browser_choice(name)
+            print(f"STATUS_LAUNCH ok browser={name}")
+            sys.exit(0)
+        sys.exit("❌ 브라우저 실행/CDP 확인 실패")
 
     # --require-model은 모델 검증 경로(select_model)에서만 효력 → --model 없이 단독 사용 시 검증이 통째로
     # 스킵되는 fail-open을 차단(fail-closed). 모델/추론단계를 함께 지정해야 검증이 돈다.
@@ -1131,9 +1326,14 @@ def main():
               or (Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else None)
               or DEFAULT_PROMPT)
 
-    print(f"\n[2/3] 브라우저 준비 ({args.browser})")
+    resolved_browser = resolve_browser(args.browser)
+    bname = resolved_browser[0] if resolved_browser else (args.browser or "자동감지")
+    print(f"\n[2/3] 브라우저 준비 ({bname})")
     if not ensure_browser(args.browser):
         sys.exit(1)
+    # 명시적 지정(--browser)일 때만 영속화 — 자동감지 폴백을 사용자 선택처럼 굳히지 않는다.
+    if args.browser and resolved_browser:
+        save_browser_choice(resolved_browser[0])
 
     print("\n[3/3] ChatGPT 투입 & 응답 회수")
     response = ""
@@ -1149,6 +1349,7 @@ def main():
                 if ctx is None:
                     raise RuntimeError("브라우저 context 없음 (로그인된 Comet/Chrome 필요)")
                 page = ctx.new_page()
+                _guard_dialogs(ctx, page)
                 try:
                     page.goto(CHATGPT_URL, wait_until="load", timeout=60000)
                     time.sleep(3)
@@ -1230,7 +1431,7 @@ def main():
                     if status == "timeout":
                         print("  ⚠️  타임아웃 — 미완성 응답은 성공저장 안 함(fail-closed) → 재시도")
                         continue
-                    if status == "ok" and text and len(text.strip()) >= 40:
+                    if status == "ok" and text and text.strip():
                         response = text
                     else:
                         print(f"  ⚠️  응답 비었거나 너무 짧음(status={status}) → 재시도")

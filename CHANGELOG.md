@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 — 2026-06-22
+
+- **다이얼로그 행/크래시 수정:** `connect_over_cdp`로 실제 브라우저에 붙을 때 ChatGPT 페이지의 JS 다이얼로그(beforeunload 등)가 playwright 기본 auto-dismiss와 레이스 → `ProtocolError: No dialog is showing` 미캐치 예외로 드라이버 크래시(100% CPU 스핀, 프롬프트 제출 실패). 페이지/컨텍스트에 다이얼로그 핸들러(`_guard_dialogs`)를 등록해 기본 auto-dismiss를 대체하고 레이스를 무시. 실제 ChatGPT 제출→응답 회수로 검증.
+
 ## 0.3.1 — 2026-06-22
 
 Hardening of the v0.3.0 project grouping, from a GPT-5.5 Pro self-review of the new code:
