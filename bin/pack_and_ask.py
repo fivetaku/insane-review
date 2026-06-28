@@ -560,9 +560,17 @@ def check_env(do_install: bool = False) -> int:
     for name, hint in issues:
         print(f"  ✗ {name}\n      → {hint}")
 
-    # 머신 파싱용 상태 라인 — 커맨드 온보딩이 어느 단계가 막혔는지 분기에 사용
+    # 저장된 브라우저 선택값(있으면 이름) — 커맨드가 "최초 1회만 질문" 분기를 명시적으로 판단.
+    _saved = _load_config().get("browser")
+    if _saved:
+        _r = resolve_browser(_saved)
+        saved_browser = _r[0] if _r else _saved
+    else:
+        saved_browser = "none"
+
+    # 머신 파싱용 상태 라인 — 커맨드 온보딩이 어느 단계가 막혔는지 분기에 사용(토큰 additive)
     print(f"\nSTATUS node={'ok' if node_ok else 'missing'} deps={'ok' if deps_ok else 'missing'} "
-          f"browser={browser_state} login={login_state} os={host_os()}")
+          f"browser={browser_state} login={login_state} saved_browser={saved_browser} os={host_os()}")
     # 설치된 크로미움 목록 — 커맨드가 브라우저 선택 AskUserQuestion을 구성하는 데 사용
     bs = detect_browsers()
     print("BROWSERS " + ",".join(n for n, _ in bs))
@@ -1306,6 +1314,9 @@ def main():
     ap.add_argument("--out-dir", default=None,
                     help="출력 저장 폴더(기본: 현재 프로젝트의 .insane-review/; env INSANE_REVIEW_OUT)")
     ap.add_argument("--check-env", action="store_true")
+    ap.add_argument("--ensure-env", action="store_true",
+                    help="저장된 브라우저가 있고 CDP가 닫혀(down) 있으면 조용히 1회 자동 기동 후 점검 "
+                         "(저장값-only·첫감지 폴백 없음; browser=wrong이면 자동기동 안 함)")
     ap.add_argument("--install", action="store_true")
     ap.add_argument("--council", action="store_true",
                     help="agent-council 멤버 모드: 로그는 stderr, 응답만 stdout")
@@ -1314,6 +1325,18 @@ def main():
     args = ap.parse_args()
 
     if args.check_env:
+        sys.exit(check_env(do_install=args.install))
+
+    if args.ensure_env:
+        # 저장값-only 자동기동: CDP가 '닫힘'(down)이고 저장된 브라우저가 해석되면 한 번만 띄운다.
+        # browser=wrong(포트를 다른 프로세스가 점유)이거나 저장값이 없으면 자동기동하지 않고,
+        # check_env가 상태만 보고한다 → 커맨드가 그때만 사용자에게 묻는다(최초 1회 온보딩).
+        if not is_port_open(CDP_PORT):
+            saved = _load_config().get("browser")
+            if saved:
+                r = resolve_browser(saved)   # 인자 지정 경로 → 첫감지 폴백 없음(저장값-only)
+                if r:
+                    launch_browser_exe(r[1])
         sys.exit(check_env(do_install=args.install))
 
     if args.list_browsers:

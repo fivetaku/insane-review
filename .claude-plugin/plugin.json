@@ -1,6 +1,6 @@
 {
   "name": "insane-review",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "GPT-5.5 Pro(웹 전용·API 없음)를 Claude Code 안에서 활용 — repomix로 관련 코드만 정밀 패킹 → 구독 ChatGPT Pro에 투입 → 분석/의견 회수. agent-council 웹 전용 멤버로도 통합.",
   "author": {
     "name": "fivetaku",
