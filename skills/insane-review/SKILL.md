@@ -9,6 +9,19 @@ description: GPT-5.5 Pro(웹 전용·API 없음)를 Claude Code 안에서 활용
 
 핵심 가치는 "통째 패킹"이 아니라 **"의도 파악 → 관련 타겟만 정밀 선별 → 그것만 패킹"** 이다. 이 선별을 Claude(너)가 수행하는 것이 이 도구의 차별점이다.
 
+## 도구 위치 해석 (런타임 불문)
+
+Claude Code 플러그인 런타임은 `<plugin>` 자리를 `CLAUDE_PLUGIN_ROOT`로 채울 수 있지만, 이 스킬을 다른 에이전트 런타임(GJC 등)이나 git clone으로 쓰는 환경엔 그 변수가 없다. 이 문서의 모든 명령은 아래 해석을 먼저 통과한다 — 절대경로 하드코딩 금지:
+
+```bash
+IR_HOME="${CLAUDE_PLUGIN_ROOT:-${INSANE_REVIEW_HOME:?export INSANE_REVIEW_HOME=<insane-review 설치/체크아웃 경로>}}"
+IR_PY="${INSANE_REVIEW_PYTHON:-python3}"
+```
+
+- 우선순위: 플러그인 런타임(`CLAUDE_PLUGIN_ROOT`) → env 오버라이드(`INSANE_REVIEW_HOME`) → 없으면 **fail-loud**(어느 경로도 조용히 추측하지 않는다).
+- `"$IR_HOME/bin/pack_and_ask.py"`가 없으면 에러로 끝내지 말고 사용자에게 설치 위치를 물어 셸 rc에 `export INSANE_REVIEW_HOME=…` 1회 설정을 안내한다.
+- `INSANE_REVIEW_PYTHON`은 venv 파이썬을 쓰는 환경용 오버라이드(기존 `INSANE_REVIEW_MAX_WAIT`·`INSANE_REVIEW_CDP_PORT`와 같은 env 계열).
+
 ## 선행 조건 — 선택지 기반 온보딩 (사용자에게 CLI 타이핑 금지)
 
 **커맨드 Step 0이 이걸 자동화한다.** Claude가 `--check-env`를 직접 돌려 마지막 `STATUS node=… deps=… browser=… login=…`을
@@ -16,7 +29,7 @@ description: GPT-5.5 Pro(웹 전용·API 없음)를 Claude Code 안에서 활용
 초보자는 클릭만으로 따라온다.
 
 - **deps**(`playwright`·`pyperclip`): 없으면 "지금 자동 설치" 선택 → `--check-env --install`. (`npx`/repomix는 `npx -y`로 완전 자동.)
-- **browser**: 크로미움 계열 브라우저가 디버그포트(9222)에 **전용 프로필**로 떠 있어야 함(주 브라우저와 격리; Chrome 136+는 전용 프로필 없으면 CDP가 안 열림). 없으면 `--check-env`의 `BROWSERS …` 목록으로 브라우저를 고르게 한 뒤 Claude가 `pack_and_ask.py --launch-browser "<이름>"`(크로스플랫폼 mac/win/linux·전용 프로필·선택 자동 저장)을 실행. 1개뿐이면 전용 브라우저 1개 설치를 권장. (쿠키는 전용 프로필에 보존 → 로그인 유지.)
+- **browser**: 크로미움 계열 브라우저가 디버그포트(9222)에 **전용 프로필**로 떠 있어야 함(주 브라우저와 격리; Chrome 136+는 전용 프로필 없으면 CDP가 안 열림). 없으면 `--check-env`의 `BROWSERS …` 목록으로 브라우저를 고르게 한 뒤 Claude가 `"$IR_PY" "$IR_HOME/bin/pack_and_ask.py" --launch-browser "<이름>"`(크로스플랫폼 mac/win/linux·전용 프로필·선택 자동 저장)을 실행. 1개뿐이면 전용 브라우저 1개 설치를 권장. (쿠키는 전용 프로필에 보존 → 로그인 유지.)
 - **login**: `--check-env`의 로그인 프로브가 `login=no`면, "방금 연 브라우저에서 chatgpt.com 로그인 + GPT-5.5 Pro 선택" 후 "로그인 완료" 선택 → 재점검. **로그인은 자동 불가 → 반드시 사용자에게 요청**(에러로 끝내지 말 것).
 - **모델 5.5 Pro**: 스크립트 `--model pro`가 자동선택·검증(`--require-model "GPT-5.5"`). 안 되면 사용자가 1회 수동 설정하면 새 채팅이 상속.
 
@@ -36,7 +49,7 @@ description: GPT-5.5 Pro(웹 전용·API 없음)를 Claude Code 안에서 활용
 
 ### 3) 패킹 + 투입 + 회수 — 스크립트 실행
 ```bash
-python3 <plugin>/bin/pack_and_ask.py \
+"$IR_PY" "$IR_HOME/bin/pack_and_ask.py" \
   --target <repo_root> --include "<관련 파일 글롭>" \
   --model pro --require-model "GPT-5.5" \
   --prompt "<의도를 담은 정확한 질문 — '판정마다 파일/라인/코드조각을 인용하라'를 반드시 포함>"
@@ -48,7 +61,7 @@ printf "src/a.ts\nsrc/b.ts\n" > /tmp/files.txt
 ```
 **레포 없이 순수 질문(의견)만:** `--target` 생략 → 프롬프트만 전송.
 ```bash
-python3 <plugin>/bin/pack_and_ask.py --model pro --force-answer-after 90 \
+"$IR_PY" "$IR_HOME/bin/pack_and_ask.py" --model pro --force-answer-after 90 \
   --prompt "<질문>"
 ```
 
