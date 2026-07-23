@@ -593,16 +593,34 @@ def probe_login() -> dict:
                 res["login"], res["cookie"] = "no", "missing"
                 return res
             res["cookie"], res["cookie_exp"] = _cookie_state(ctx)
-            page = ctx.new_page()
-            _guard_dialogs(ctx, page)
-            try:
-                page.goto(CHATGPT_URL, wait_until="load", timeout=30000)
-                res["login"] = login_state(page, wait_secs=15)
-            finally:
+            # 기존 chatgpt.com 탭이 있으면 재사용한다 — 사용자가 로그인 중인 탭을
+            # 빼앗지 않기 위해. 없을 때만 새 탭을 연다.
+            page = None
+            for p in ctx.pages:
                 try:
-                    page.close()
+                    if "chatgpt.com" in (p.url or ""):
+                        page = p
+                        break
                 except Exception:
                     pass
+            created = page is None
+            if created:
+                page = ctx.new_page()
+            _guard_dialogs(ctx, page)
+            try:
+                if created:
+                    page.goto(CHATGPT_URL, wait_until="load", timeout=30000)
+                res["login"] = login_state(page, wait_secs=15)
+            finally:
+                # 이번에 새로 연 탭이고, 로그인이 확인됐고(ok), 마지막 탭이 아닐 때만 닫는다.
+                # login이 no/unknown이면 사용자가 그 탭에서 로그인해야 하므로 남긴다
+                # (다음 점검이 위에서 이 탭을 재사용). 마지막 탭이면 닫으면 창이 사라지므로
+                # 어떤 경우에도 닫지 않는다.
+                if created and res["login"] == "ok" and len(ctx.pages) > 1:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
     except Exception:
         pass
     return res
