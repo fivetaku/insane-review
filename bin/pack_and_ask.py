@@ -984,7 +984,13 @@ def read_menu_state(page) -> dict:
             is_checked = it.get_attribute("aria-checked") == "true" or it.get_attribute("aria-selected") == "true"
             t = (it.inner_text() or "").strip()
             if t and re.search(r"GPT|gpt|o\d|Claude|Gemini", t):
-                name = t.splitlines()[0][:40]
+                lines = [l.strip() for l in t.splitlines() if l.strip()]
+                # UI 변형 대응: '모델\nGPT-5.6 Sol'처럼 라벨 줄 + 값 줄로 오는 경우
+                # 모델 패턴이 실제로 매칭되는 줄을 이름으로 취한다.
+                name = next(
+                    (l for l in lines if re.search(r"GPT|gpt|o\d|Claude|Gemini", l)),
+                    lines[0] if lines else t,
+                )[:40]
                 if name not in state["models"]:
                     state["models"].append(name)
                 if is_checked and not state["model"]:
@@ -1008,6 +1014,21 @@ def read_menu_state(page) -> dict:
                 state["effort_checked"] = t
     except Exception:
         pass
+    # UI 변형 대응: 추론단계가 '추론 강도 / Pro'처럼 일반 menuitem의 값 줄로만
+    # 표시되는 경우 마지막 줄을 현재 선택값으로 읽는다.
+    if not state["effort_checked"]:
+        try:
+            for it in page.query_selector_all('[role="menuitem"]'):
+                t = (it.inner_text() or "").strip()
+                if re.search(r"추론|reasoning|effort", t, re.IGNORECASE) and not re.search(
+                    r"GPT|gpt|o\d|Claude|Gemini", t
+                ):
+                    lines = [l.strip() for l in t.splitlines() if l.strip()]
+                    if len(lines) >= 2:
+                        state["effort_checked"] = lines[-1][:40]
+                    break
+        except Exception:
+            pass
     return state
 
 
@@ -1041,29 +1062,39 @@ def select_model(page, want: str, require_model: str | None = None) -> tuple[boo
                 pass
             return False, None
 
-    # 추론단계 클릭 대상 탐색
+    # 추론단계 클릭 대상 탐색 (현재 선택이 이미 원하는 단계면 클릭 불필요)
     clicked = None
-    cands = []
-    for sel in EFFORT_ITEM_SELECTORS:
+    if before["effort_checked"] and want_l in before["effort_checked"].lower():
+        clicked = f"already:{before['effort_checked']}"
         try:
-            cands.extend(page.query_selector_all(sel))
+            # 검증용 재오픈이 열린 메뉴를 토글로 닫지 않도록 먼저 닫아둔다.
+            page.keyboard.press("Escape")
+            time.sleep(0.5)
         except Exception:
-            continue
-
-    for exact in (True, False):
-        for it in cands:
+            pass
+    cands = []
+    if not clicked:
+        for sel in EFFORT_ITEM_SELECTORS:
             try:
-                t = (it.inner_text() or "").strip()
-                low = t.lower()
-                if (exact and low == want_l) or (not exact and want_l in low):
-                    it.click()
-                    clicked = t.splitlines()[0][:40]
-                    time.sleep(1.5)  # 클릭 후 드롭다운이 닫히는 시간 대기
-                    break
+                cands.extend(page.query_selector_all(sel))
             except Exception:
                 continue
-        if clicked:
-            break
+
+    if not clicked:
+        for exact in (True, False):
+            for it in cands:
+                try:
+                    t = (it.inner_text() or "").strip()
+                    low = t.lower()
+                    if (exact and low == want_l) or (not exact and want_l in low):
+                        it.click(force=True)
+                        clicked = t.splitlines()[0][:40]
+                        time.sleep(1.5)  # 클릭 후 드롭다운이 닫히는 시간 대기
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                break
 
     if not clicked:
         print(f"  ⚠️  '{want}' 추론단계 항목 못 찾음 → 기본값")
