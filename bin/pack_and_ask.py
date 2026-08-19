@@ -1489,7 +1489,8 @@ def click_answer_now(page) -> bool:
 def wait_for_turn_response(page, force_after=None, max_wait=None,
                            base_user: int = 0, base_assistant: int = 0, base_copy: int = 0,
                            conv_url: str | None = None, base_ids: set | None = None,
-                           skip_sent_check: bool = False) -> tuple[str, str, str | None]:
+                           skip_sent_check: bool = False,
+                           on_bind=None) -> tuple[str, str, str | None]:
     """전송이 만든 '대화 URL' + message-id에 결속해 응답을 회수(v0.6.0 identity 결속).
     - conv_url: 이미 결속된 대화 URL(회수 재시도/harvest). None이면 전송 직후 SPA에서 포착.
     - base_ids: 전송 직전 DOM의 data-message-id 집합 — 신규 턴을 id 차집합으로 판정.
@@ -1520,6 +1521,14 @@ def wait_for_turn_response(page, force_after=None, max_wait=None,
         if conv_url is None:
             return ("sent_unknown_location", "", None)
         print(f"  🔗 대화 결속: {conv_url}")
+        # 영속화는 '결속 직후'여야 한다. 대기 루프가 끝난 뒤에 적으면 프로세스가
+        # 대기 중 죽는 창(실측 2026-08-13: 31분 생성 후 중단, 이후 19분 폴링)에서
+        # 디스크에 아무것도 남지 않아 --harvest 대상 자체가 사라진다.
+        if on_bind is not None:
+            try:
+                on_bind(conv_url)
+            except Exception:
+                pass
     _m = CONV_URL_RE.search(conv_url)
     conv_key = _m.group(0) if _m else None
 
@@ -2123,7 +2132,9 @@ def main():
                         status, text, conv_url = wait_for_turn_response(
                             page, force_after=args.force_answer_after, max_wait=mw_eff,
                             base_user=base_user, base_assistant=base_assistant,
-                            base_copy=base_copy, base_ids=base_ids_snapshot)
+                            base_copy=base_copy, base_ids=base_ids_snapshot,
+                            on_bind=lambda url: write_run_manifest(
+                                manifest_path, url, label, run_tag, send_prompt, pack_path))
                         if conv_url:
                             # 전송 직후 디스크 영속화 — 프로세스가 죽어도 --harvest로 회수 가능(카운슬 P0 승격)
                             write_run_manifest(manifest_path, conv_url, label, run_tag, send_prompt, pack_path)
