@@ -2272,6 +2272,8 @@ def main():
                     help="agent-council 멤버 모드: 로그는 stderr, 응답만 stdout")
     ap.add_argument("--harvest", default=None, metavar="CHAT_URL|MANIFEST",
                     help="전송 없이 기존 대화에서 완료된 응답만 회수(타임아웃 시 안내된 대화 URL 또는 manifest_*.json 경로)")
+    ap.add_argument("--continue-chat", default=None, metavar="CHAT_URL|MANIFEST",
+                    help="기존 대화에 후속 메시지를 보내고 그 턴만 회수(새 채팅 생성 없음)")
     ap.add_argument("--retries", type=int, default=1)
     ap.add_argument("prompt_args", nargs="*", help="프롬프트(위치인자 — council 호환)")
     args = ap.parse_args()
@@ -2340,6 +2342,24 @@ def main():
         if not harvest_url or not CONV_URL_RE.search(harvest_url):
             sys.exit(f"❌ --harvest 인자가 대화 URL(/c/<id>)이 아님: {args.harvest}")
         args.target = None  # 회수 모드는 전송이 없다 — 패킹 생략
+
+    # --continue-chat: 결속된 대화에 이어서 보낸다. 새 채팅을 만들지 않으므로 컨텍스트가
+    # 대화에 남고, 매 호출 전체 트랜스크립트를 다시 보낼 필요가 없다.
+    continue_url = None
+    if args.continue_chat:
+        _c = Path(args.continue_chat).expanduser()
+        if _c.exists():
+            try:
+                continue_url = json.loads(_c.read_text(encoding="utf-8")).get("chat_url")
+            except Exception:
+                sys.exit(f"❌ manifest 파싱 실패: {_c}")
+        else:
+            continue_url = args.continue_chat
+        if not continue_url or not CONV_URL_RE.search(continue_url):
+            sys.exit(f"❌ --continue-chat 인자가 대화 URL(/c/<id>)이 아님: {args.continue_chat}")
+        if harvest_url:
+            sys.exit("❌ --harvest(회수 전용)와 --continue-chat(전송)은 함께 쓸 수 없습니다.")
+        args.target = None  # 이어 보내기는 첨부 없이 프롬프트만 보낸다
 
     real_stdout = sys.stdout
     if args.council:
@@ -2421,8 +2441,9 @@ def main():
     print("\n[3/3] ChatGPT 투입 & 응답 회수")
     print("  ⚠️  회수가 끝날 때까지 전용 브라우저 창을 조작하지 마세요(이탈 시 자동 복귀하지만 오염 위험)")
     response = ""
-    conv_url = harvest_url          # 결속된 대화 URL — 있으면 이후 시도는 '회수 재시도'(재전송 금지)
+    conv_url = harvest_url or continue_url   # 결속된 대화 URL — 이후 시도는 '회수 재시도'(재전송 금지)
     base_ids_snapshot: set | None = (set() if harvest_url else None)
+    continue_sent = False           # 이어 보내기는 판당 정확히 한 번 — 재시도는 회수만
     sent_unknown = False
     quota_hit = False
     manifest_path = out_dir / f"manifest_{label}_{run_tag}.json"
@@ -2452,14 +2473,43 @@ def main():
                     if conv_url:
                         # ── 회수 경로(재전송 없음): 결속된 대화 URL로 가서 이어서/다시 대기 ──
                         # 타임아웃·예외 후 재시도와 --harvest가 모두 이 경로 — 중복 채팅 생성 원천 차단.
-                        print(f"  🔁 회수 모드(재전송 없음): {conv_url}")
+                        if continue_url and not continue_sent:
+                            print(f"  ➕ 이어 보내기: {conv_url}")
+                        else:
+                            print(f"  🔁 회수 모드(재전송 없음): {conv_url}")
                         page.goto(conv_url, wait_until="load", timeout=60000)
                         time.sleep(2)
                         if login_state(page) == "no":
                             raise RuntimeError("ChatGPT 로그인 벽 감지 — 해당 브라우저에서 chatgpt.com 로그인 확인")
+                        # 이어 보내기는 이 판에서 정확히 한 번. 재시도는 전송 없이 회수만
+                        # 한다 — 중복 전송은 구독 메시지를 두 번 쓰는 것이다.
+                        sent_now = False
+                        base_user = base_assistant = base_copy = 0
+                        if continue_url and not continue_sent:
+                            for _ in range(10):
+                                if find_input(page):
+                                    break
+                                time.sleep(1)
+                            if find_input(page) is None:
+                                raise RuntimeError("이어 보낼 대화의 컴포저 미확인 → 전송 중단(fail-closed)")
+                            base_user = count_msgs_strict(page, USER_MSG_SELECTORS)
+                            base_assistant = count_msgs_strict(page, ASSISTANT_MSG_SELECTORS)
+                            base_copy = count_msgs_strict(page, COPY_BTN_SELECTORS)
+                            base_ids_snapshot = msg_id_set(page)
+                            put_text(page, prompt)
+                            if not composer_has_prompt(page, prompt):
+                                clear_composer(page)
+                                put_text(page, prompt)
+                                if not composer_has_prompt(page, prompt):
+                                    raise RuntimeError("프롬프트가 입력창에 온전히 안 들어감 → 중단(fail-closed)")
+                            click_send(page)
+                            continue_sent = sent_now = True
+                            print("  ✓ 이어 보냄 — 새 채팅을 만들지 않았다")
                         status, text, conv_url = wait_for_turn_response(
                             page, force_after=args.force_answer_after, max_wait=mw_eff,
-                            conv_url=conv_url, base_ids=base_ids_snapshot, skip_sent_check=True)
+                            base_user=base_user, base_assistant=base_assistant,
+                            base_copy=base_copy, conv_url=conv_url,
+                            base_ids=base_ids_snapshot, skip_sent_check=not sent_now)
                         if status == "quota":
                             print("  ⛔ 사용량 한도 감지 — 회수 재시도 중단(한도 해제 후 --harvest 재실행)")
                             break
