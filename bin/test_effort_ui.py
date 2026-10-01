@@ -240,6 +240,19 @@ class EffortUITests(unittest.TestCase):
         self.load(slider_html().replace('ChatGPT 모델 선택', 'ChatGPT model selector'))
         self.assert_selection('high', 'High')
 
+    def test_waits_for_late_rendered_switcher(self):
+        # Live 2026-10-02: the composer can appear before the model button renders.
+        html = slider_html().replace('<button ', '<button style="display:none" ', 1)
+        html += "<script>setTimeout(()=>{trigger.style.display='';},400)</script>"
+        self.load(html)
+        self.assert_selection('high', 'High')
+
+    def test_unavailable_effort_restores_original_step(self):
+        # The selection is sticky account state: a failed search must not leave the slider moved.
+        self.load(slider_html(['Instant', 'Medium', 'High', 'Extra High'], initial=1))
+        self.assertFalse(review.select_model(self.page, 'pro')[0])
+        self.assertEqual(self.page.locator('#trigger').inner_text(), 'Medium')
+
     def test_missing_pro_does_not_mean_slider_max(self):
         self.load(slider_html(['Instant', 'Medium', 'High', 'Extra High']))
         self.assertFalse(review.select_model(self.page, 'pro')[0])

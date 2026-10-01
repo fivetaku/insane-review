@@ -114,8 +114,8 @@ La salida se guarda en la carpeta `.insane-review/` del **proyecto actual** (com
 |------|---------|
 | `--target <dir>` | Carpeta a empaquetar (omítelo para una opinión solo con prompt) |
 | `--include <glob>` / `--ignore <glob>` | Acota el conjunto empaquetado |
-| `--model pro` | Selecciona el esfuerzo de razonamiento (p. ej. Pro) |
-| `--require-model "GPT-5.6"` | Verifica el nombre del modelo activo — aborta el envío si no coincide (fail-closed) |
+| `--effort <nivel>` (alias `--model`) | Esfuerzo de razonamiento — por defecto `pro`; `instant`/`medium`/`high`/`xhigh` se aplican tal cual y una discrepancia aborta |
+| `--require-model "<nombre>"` | Fija el nombre del modelo — aborta si no coincide. **La UI actual solo muestra el nombre del modelo en el nivel Pro (p. ej. `6`); en otros niveles no se puede leer, así que siempre aborta.** Omítelo para seguir al modelo insignia |
 | `--prompt "..."` / `--prompt-file` | La pregunta |
 | `--pack-only` | Solo empaqueta (inspecciona el recuento de tokens), sin enviar |
 | `--council` | Modo council — respuesta por stdout, logs por stderr |
@@ -153,7 +153,7 @@ Otras variables de entorno:
 ```bash
 # example: give Pro up to 25 minutes, but cut reasoning at 5 minutes if it's still thinking
 INSANE_REVIEW_MAX_WAIT=1500 python3 bin/pack_and_ask.py \
-  --target . --include "src/**" --model pro --require-model "GPT-5.6" \
+  --target . --include "src/**" --model pro \
   --force-answer-after 300 --prompt "Where are the concurrency bugs?"
 ```
 

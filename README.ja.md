@@ -114,8 +114,8 @@ Harvest the answer → save to  ./.insane-review/response_*.md  (atomic write)
 |------|------|
 | `--target <dir>` | パッキングするフォルダ（省略時はプロンプトのみの意見モード） |
 | `--include <glob>` / `--ignore <glob>` | パッキング範囲を絞る |
-| `--model pro` | 推論エフォートを選択（例：Pro） |
-| `--require-model "GPT-5.6"` | アクティブなモデル名を検証 — 不一致なら送信を中止（fail-closed） |
+| `--effort <段階>`（別名 `--model`） | 推論エフォート — 既定は `pro`。`instant`/`medium`/`high`/`xhigh` はそのまま適用し、不一致なら中止 |
+| `--require-model "<名前>"` | モデル名を固定 — 不一致なら中止。**現在の UI は Pro 段階でのみモデル名（例: `6`）を表示し、他の段階では読み取れないため常に中止される。** フラッグシップ自動追従には指定しない |
 | `--prompt "..."` / `--prompt-file` | 質問 |
 | `--pack-only` | パッキングのみ（トークン数の確認）、送信しない |
 | `--council` | council モード — 応答は stdout、ログは stderr |
@@ -153,7 +153,7 @@ Harvest the answer → save to  ./.insane-review/response_*.md  (atomic write)
 ```bash
 # example: give Pro up to 25 minutes, but cut reasoning at 5 minutes if it's still thinking
 INSANE_REVIEW_MAX_WAIT=1500 python3 bin/pack_and_ask.py \
-  --target . --include "src/**" --model pro --require-model "GPT-5.6" \
+  --target . --include "src/**" --model pro \
   --force-answer-after 300 --prompt "Where are the concurrency bugs?"
 ```
 

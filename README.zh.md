@@ -114,8 +114,8 @@ Harvest the answer → save to  ./.insane-review/response_*.md  (atomic write)
 |------|------|
 | `--target <dir>` | 要打包的文件夹（省略则为纯提问的意见模式） |
 | `--include <glob>` / `--ignore <glob>` | 收窄打包范围 |
-| `--model pro` | 选择推理力度（如 Pro） |
-| `--require-model "GPT-5.6"` | 校验当前激活的模型名 — 不匹配即中止发送（fail-closed） |
+| `--effort <档位>`（别名 `--model`） | 推理力度 — 默认 `pro`；`instant`/`medium`/`high`/`xhigh` 按原样应用，不匹配即中止 |
+| `--require-model "<名称>"` | 固定模型名 — 不匹配即中止。**当前 UI 仅在 Pro 档显示模型名（如 `6`），其他档位无法读取，因此会始终中止。** 想自动跟随旗舰模型就不要指定 |
 | `--prompt "..."` / `--prompt-file` | 问题 |
 | `--pack-only` | 只打包（查看 token 数），不发送 |
 | `--council` | council 模式 — 响应走 stdout，日志走 stderr |
@@ -153,7 +153,7 @@ Harvest the answer → save to  ./.insane-review/response_*.md  (atomic write)
 ```bash
 # example: give Pro up to 25 minutes, but cut reasoning at 5 minutes if it's still thinking
 INSANE_REVIEW_MAX_WAIT=1500 python3 bin/pack_and_ask.py \
-  --target . --include "src/**" --model pro --require-model "GPT-5.6" \
+  --target . --include "src/**" --model pro \
   --force-answer-after 300 --prompt "Where are the concurrency bugs?"
 ```
 

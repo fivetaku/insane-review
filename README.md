@@ -114,8 +114,8 @@ Output lands in the **current project's** `.insane-review/` folder (like kkirikk
 |------|---------|
 | `--target <dir>` | Folder to pack (omit for a prompt-only opinion) |
 | `--include <glob>` / `--ignore <glob>` | Narrow the packed set |
-| `--model pro` | Select the reasoning effort (e.g. Pro) |
-| `--require-model "GPT-5.6"` | Verify the active model name — abort send on mismatch (fail-closed) |
+| `--effort <step>` (alias `--model`) | Reasoning effort — default `pro`; `instant`/`medium`/`high`/`xhigh` are applied exactly, mismatch aborts |
+| `--require-model "<name>"` | Pin the model name — abort on mismatch. **The current UI shows the model name only at the Pro step (e.g. `6`) and it is unreadable at other steps, so pinning there always aborts.** Omit it to follow the flagship |
 | `--prompt "..."` / `--prompt-file` | The question |
 | `--pack-only` | Just pack (inspect token count), don't send |
 | `--council` | Council mode — response on stdout, logs on stderr |
@@ -153,7 +153,7 @@ Other environment overrides:
 ```bash
 # example: give Pro up to 25 minutes, but cut reasoning at 5 minutes if it's still thinking
 INSANE_REVIEW_MAX_WAIT=1500 python3 bin/pack_and_ask.py \
-  --target . --include "src/**" --model pro --require-model "GPT-5.6" \
+  --target . --include "src/**" --model pro \
   --force-answer-after 300 --prompt "Where are the concurrency bugs?"
 ```
 

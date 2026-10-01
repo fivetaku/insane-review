@@ -24,7 +24,7 @@ council:
       color: "BLUE"
     # ── GPT Pro (웹 전용, insane-review 경유) ──
     - name: gpt-pro
-      command: "python3 /ABS/PATH/plugins/insane-review/bin/pack_and_ask.py --council --model pro --require-model \"GPT-5.6\" --force-answer-after 120"
+      command: "python3 /ABS/PATH/plugins/insane-review/bin/pack_and_ask.py --council --model pro --force-answer-after 120"
       emoji: "🌐"
       color: "MAGENTA"
   settings:
@@ -33,7 +33,7 @@ council:
 ```
 
 - `/ABS/PATH`는 절대경로로. (council worker는 셸 없이 execFile 하므로 경로에 공백 없게.)
-- `--require-model "GPT-5.6"`: council 경로에서도 활성 모델명을 검증(불일치/미확정이면 fail-closed로 전송 중단). 빼면 effort만 검증되고 기반 모델은 무엇이든 통과한다. **모델명은 부분 일치라 "GPT-5.6"이면 "GPT-5.6 Sol"에 매칭된다. 플래그십이 바뀌면 이 값도 갱신할 것**(안 하면 fail-closed로 전 실행이 차단됨) — 자동 추종을 원하면 아예 빼라.
+- `--require-model "<이름>"`(선택): 모델명 고정. **현재 ChatGPT UI는 Pro 단계에서만 모델명(예: `6`)을 보여 주고 다른 단계에선 판독할 수 없어, 지정하면 그 단계에서는 항상 전송이 중단된다.** 위 예시는 이를 빼서 플래그십을 자동 추종한다. 고정이 꼭 필요하면 Pro 단계에서 화면에 보이는 이름 그대로 넣고, 플래그십이 바뀌면 갱신할 것.
 - `--force-answer-after 120`: 120초 후 "지금 답변 받기"로 리즈닝을 끊어 회수 시간을 bound. council `timeout`은 그보다 넉넉히(예: 600).
 - council은 멤버를 **병렬 detached**로 띄운다. gpt-pro는 자기 브라우저 탭을 새로 열므로 다른 멤버와 충돌하지 않지만, **동시에 두 개의 insane-review 잡이 같은 브라우저를 몰면 안 된다**(한 council 잡에 gpt-pro 멤버는 하나).
 
@@ -44,7 +44,7 @@ council:
 ## 검증 방법
 ```bash
 # 단독으로 council 계약 확인: stdout엔 응답만, stderr엔 로그
-python3 plugins/insane-review/bin/pack_and_ask.py --council --model pro --require-model "GPT-5.6" \
+python3 plugins/insane-review/bin/pack_and_ask.py --council --model pro \
   --force-answer-after 60 "한 문장으로: 1+1은?" 2>/dev/null
 # → GPT 응답 텍스트만 출력되어야 한다
 ```

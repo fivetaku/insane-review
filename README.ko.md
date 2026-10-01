@@ -114,8 +114,8 @@ pack 첨부 + 프롬프트  → 프롬프트가 입력창에 실제로 들어갔
 |--------|------|
 | `--target <dir>` | 패킹할 폴더(생략 시 질문만 = 의견 모드) |
 | `--include <glob>` / `--ignore <glob>` | 패킹 범위 좁히기 |
-| `--model pro` | 추론단계 선택(예: Pro) |
-| `--require-model "GPT-5.6"` | 활성 모델명 검증 — 불일치 시 전송 중단(fail-closed) |
+| `--effort <단계>` (별칭 `--model`) | 추론단계 — 기본 `pro`, `instant`/`medium`/`high`/`xhigh`(한국어 `즉시`/`중간`/`높음`/`매우 높음`)는 그대로 적용, 불일치 시 중단 |
+| `--require-model "<이름>"` | 모델명 고정 — 불일치 시 중단. **현재 UI는 Pro 단계에서만 모델명(예: `6`)을 보여 주고 다른 단계에선 판독할 수 없어 항상 중단된다.** 플래그십 자동 추종을 원하면 빼라 |
 | `--prompt "..."` / `--prompt-file` | 질문 |
 | `--pack-only` | 패킹만(토큰 확인), 전송 안 함 |
 | `--council` | council 모드 — 응답만 stdout, 로그는 stderr |
@@ -153,7 +153,7 @@ Pro 완전추론은 10~15분이 걸릴 수 있어, 응답 대기·패킹 타임�
 ```bash
 # 예: Pro에 최대 25분 주되, 5분까지도 추론 중이면 거기서 끊어 답변 받기
 INSANE_REVIEW_MAX_WAIT=1500 python3 bin/pack_and_ask.py \
-  --target . --include "src/**" --model pro --require-model "GPT-5.6" \
+  --target . --include "src/**" --model pro \
   --force-answer-after 300 --prompt "동시성 버그 어디 있어?"
 ```
 

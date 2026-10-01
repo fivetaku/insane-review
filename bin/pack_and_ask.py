@@ -1235,6 +1235,11 @@ def _open_switcher_raw(page) -> bool:
             return True
     except Exception:
         pass
+    try:
+        # Live 2026-10-02: the composer can render before the model button does.
+        page.wait_for_selector(', '.join(MODEL_SWITCHER_SELECTORS), state="visible", timeout=10000)
+    except Exception:
+        pass
     for sel in MODEL_SWITCHER_SELECTORS:
         try:
             el = page.query_selector(sel)
@@ -1445,6 +1450,10 @@ def select_model(page, want: str, require_model: str | None = None) -> tuple[boo
     before = read_menu_state(page)
     if require_model and (before.get("model_source") != "checked" or not before["model"]
                           or require_model.lower() not in before["model"].lower()):
+        seen = before["model"] if before.get("model_source") == "checked" else None
+        print(f"  ❌ --require-model '{require_model}' 불일치: 화면 모델명="
+              + (f"'{seen}'" if seen else "판독 불가(현재 UI는 Pro 단계에서만 모델명 표시)")
+              + " — 전송 중단")
         _close_switcher(page)
         return False, None
 
@@ -1458,8 +1467,9 @@ def select_model(page, want: str, require_model: str | None = None) -> tuple[boo
         if cur is None or mx is None or not 0 <= cur <= mx <= 10:
             _close_switcher(page)
             return False, None
+        original = cur
         # Preferred position is only a probe, never proof (in particular max != Pro).
-        preferred = ["instant", "medium", "high", "xhigh", "pro"].index(requested)
+        preferred =["instant", "medium", "high", "xhigh", "pro"].index(requested)
         candidates = list(dict.fromkeys([preferred, cur] + list(range(mx + 1))))
         selected = False
         label = None
@@ -1475,6 +1485,9 @@ def select_model(page, want: str, require_model: str | None = None) -> tuple[boo
             if label and normalize_effort(label) == requested:
                 selected = True
                 break
+        if not selected:
+            # The step is sticky account state; a failed probe must not leave it moved.
+            _set_effort_slider(page, original)
         _close_switcher(page)
         # Independently verify the final closed pill; numeric movement is not enough.
         verified = selected and any(normalize_effort(_effort_label(pill) or "") == requested
