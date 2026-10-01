@@ -100,6 +100,7 @@ FILE_INPUT_SELECTOR = 'input[type="file"]'
 COPY_BTN_SELECTORS = [
     'button[data-testid="copy-turn-action-button"]',
     'button[aria-label="Copy"]',
+    'button[aria-label="복사"]',
     'button[data-testid*="copy"]',
 ]
 STREAMING_BTN_SELECTORS = [
@@ -107,8 +108,12 @@ STREAMING_BTN_SELECTORS = [
     'button[aria-label="Stop streaming"]',
     'button[data-testid*="stop"]',
 ]
-USER_MSG_SELECTORS = ['[data-message-author-role="user"]', 'section[data-turn="user"]', 'article[data-turn="user"]']
-ASSISTANT_MSG_SELECTORS = ['[data-message-author-role="assistant"]', 'section[data-turn="assistant"]', 'article[data-turn="assistant"]']
+USER_MSG_SELECTORS = ['[data-message-author-role="user"]', 'section[data-turn="user"]', 'article[data-turn="user"]',
+                      '[data-content-search-unit-key$=":user"]']
+ASSISTANT_MSG_SELECTORS = ['[data-message-author-role="assistant"]', 'section[data-turn="assistant"]', 'article[data-turn="assistant"]',
+                           '[data-content-search-unit-key$=":assistant"]']
+NEW_ASSISTANT_SELECTOR = '[data-content-search-unit-key$=":assistant"]'
+ASSISTANT_BODY_SELECTOR = '[data-markdown-text-style="assistant-message"]'
 # 턴 컨테이너(실측 2026-08-25: section[data-turn]) — copy 툴바는 메시지 div 바깥, 이 컨테이너 안에 있다
 TURN_CONTAINER_SELECTOR = 'section[data-turn], article[data-turn], [data-turn]'
 
@@ -874,12 +879,14 @@ def is_streaming(page) -> bool:
 
 
 def msg_id_set(page) -> set:
-    """현재 DOM의 data-message-id 집합(역할 무관, 실측 2026-07-19: 모든 메시지 노드에 존재).
+    """현재 DOM의 메시지 UUID 집합(구 data-message-id + 새 selection/search UUID).
     실패 시 빈 집합 — base로 쓰일 때 빈 집합은 '아무것도 제외 안 함'이라 fail-open이 아니다
     (URL 결속이 1차 방어이므로 id는 우리 채팅 안에서만 판정에 쓰인다)."""
     try:
         return set(page.eval_on_selector_all(
-            "[data-message-id]", 'els => els.map(e => e.getAttribute("data-message-id"))'))
+            '[data-message-id], [data-chatgpt-selection-message-id], [data-chatgpt-search-message-ids]',
+            '''els => els.flatMap(e => ['data-message-id', 'data-chatgpt-selection-message-id',
+              'data-chatgpt-search-message-ids'].flatMap(a => (e.getAttribute(a) || '').split(/\\s+/).filter(Boolean)))'''))
     except Exception:
         return set()
 
@@ -894,8 +901,14 @@ def new_assistant_node(page, base_ids: set | None, base_assistant: int = 0):
         if base_ids is None:
             return nodes[-1] if len(nodes) > base_assistant else None
         # id가 없는 컨테이너(section/article 폴백)는 차집합 판정 불가 → 제외(옛 턴을 '신규'로 오인 방지)
-        fresh = [n for n in nodes
-                 if (n.get_attribute("data-message-id") or "") and n.get_attribute("data-message-id") not in base_ids]
+        fresh = []
+        for n in nodes:
+            identity = n.get_attribute('data-message-id')
+            if not identity and n.get_attribute('data-content-search-unit-key'):
+                body = n.query_selector('[data-chatgpt-selection-message-id]')
+                identity = body.get_attribute('data-chatgpt-selection-message-id') if body else None
+            if identity and identity not in base_ids:
+                fresh.append(n)
         return fresh[-1] if fresh else None
     except Exception:
         return None
@@ -903,7 +916,12 @@ def new_assistant_node(page, base_ids: set | None, base_assistant: int = 0):
 
 def _node_text(node) -> str:
     try:
-        return (node.inner_text() or "") if node is not None else ""
+        if node is None:
+            return ""
+        if node.get_attribute('data-content-search-unit-key'):
+            # Never read the shared user/assistant ancestor, role header or toolbar.
+            return '\n\n'.join((body.inner_text() or '') for body in node.query_selector_all(ASSISTANT_BODY_SELECTOR))
+        return node.inner_text() or ""
     except Exception:
         return ""
 
@@ -964,18 +982,36 @@ def last_assistant_node(page):
 
 
 def last_assistant_text(page) -> str:
-    node = last_assistant_node(page)
-    if node:
-        try:
-            return node.inner_text() or ""
-        except Exception:
-            return ""
-    return ""
+    return _node_text(last_assistant_node(page))
 
 
 def node_copy_button(node):
     """해당 assistant 노드 '안'의 턴 복사 버튼(전역 마지막 버튼이 아님 — 코드블록 copy/다른 턴 오클릭 방지)."""
     if node is None:
+        return None
+    # New UI shares an ancestor with the user turn. Only accept an exact assistant
+    # copy action outside message/code content, in a scope containing this assistant
+    # and no other assistant. Never climb to the conversation/document root.
+    try:
+        wrapper = node.evaluate_handle('(n, sel) => n.closest(sel)', NEW_ASSISTANT_SELECTOR).as_element()
+        if wrapper is not None:
+            return wrapper.evaluate_handle('''(n, sel) => {
+              for (let p=n, depth=0; p && depth<=4; p=p.parentElement, depth++) {
+                if (p===document.body || p===document.documentElement) break;
+                const assistants = [...p.querySelectorAll(sel)];
+                if (p!==n && (assistants.length!==1 || assistants[0]!==n)) break;
+                const buttons = [...p.querySelectorAll('button')].filter(b => {
+                  const label = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+                  return ['copy', '복사'].includes(label) && b.getClientRects().length
+                    && !b.closest('[inert], [aria-hidden="true"], pre, code, '
+                      + '[data-markdown-text-style="assistant-message"], [data-content-search-unit-key$=":user"]');
+                });
+                if (buttons.length===1) return buttons[0];
+                if (buttons.length>1) return null;
+              }
+              return null;
+            }''', NEW_ASSISTANT_SELECTOR).as_element()
+    except Exception:
         return None
     scopes = [node]
     try:
@@ -1013,6 +1049,10 @@ def turn_terminal(page, node) -> bool:
     완성된 답을 두고 최대 대기를 소진시켰다(2026-08-24 GPT Pro 리뷰 P0)."""
     if node is None or is_streaming(page):
         return False
+    if node.evaluate('(n, sel) => !!n.closest(sel)', NEW_ASSISTANT_SELECTOR):
+        # Latest stop-button structure is unverified; a ready composer alone is
+        # not evidence that this specific assistant has finished.
+        return node_copy_button(node) is not None
     return node_copy_button(node) is not None or send_button_ready(page)
 
 
@@ -1052,6 +1092,8 @@ def copy_assistant_node(node, expected: str | None = None) -> str | None:
 
 # ---- 모델 스위처 ----
 MODEL_SWITCHER_SELECTORS = [
+    'button[data-codex-intelligence-trigger="true"]',
+    'button[aria-label="ChatGPT 모델 선택"]',
     'button.__composer-pill[aria-haspopup="menu"]',   # 실측: 모델/추론 pill
     'button[data-testid="model-switcher-dropdown-button"]',
     'button[aria-label*="model" i]',
@@ -1072,17 +1114,22 @@ INTELLIGENCE_PICKER_SELECTOR = '[data-testid="composer-intelligence-picker-conte
 # workspace_id 결속으로는 구분되지 않는다. Work 모드엔 Pro 추론단계가 아예 없고
 # (슬라이더에 Pro 눈금 부재, data-max="false") pill이 '5.6 Sol 매우 높음'으로 뜬다.
 # 선택은 sticky — 사람이 웹에서 Work로 바꿔 쓰면 이후 자동 실행이 조용히 비-Pro로 나간다.
-MODE_RADIO_SELECTOR = '[role="radiogroup"] [role="radio"]'
+MODE_RADIO_SELECTOR = ('[role="radiogroup"] [role="radio"], '
+                       '[role="group"][aria-label="작성기 모드"] button[aria-pressed], '
+                       '[role="group"][aria-label="Composer mode" i] button[aria-pressed]')
 JS_READ_MODE = """() => {
-  const rs = [...document.querySelectorAll('[role="radiogroup"] [role="radio"]')]
-    .map(x => ({label: (x.textContent || '').trim(), checked: x.getAttribute('aria-checked') === 'true'}));
+  const rs = [...document.querySelectorAll('""" + MODE_RADIO_SELECTOR + """')]
+    .filter(x => !x.closest('[inert], [aria-hidden="true"]') && x.getClientRects().length)
+    .map(x => ({label: (x.textContent || '').trim(),
+      checked: x.getAttribute('aria-checked') === 'true' || x.getAttribute('aria-pressed') === 'true'}));
   if (!rs.some(r => /^(chat|work)$/i.test(r.label))) return null;
   const on = rs.find(r => r.checked);
   return on ? on.label : '';
 }"""
 JS_CLICK_MODE = """(want) => {
-  const el = [...document.querySelectorAll('[role="radiogroup"] [role="radio"]')]
-    .find(x => (x.textContent || '').trim().toLowerCase() === want.toLowerCase());
+  const el = [...document.querySelectorAll('""" + MODE_RADIO_SELECTOR + """')]
+    .find(x => !x.closest('[inert], [aria-hidden="true"]') && x.getClientRects().length
+      && (x.textContent || '').trim().toLowerCase() === want.toLowerCase());
   if (!el) return false;
   el.click();
   return true;
@@ -1126,10 +1173,10 @@ def ensure_chat_mode(page) -> tuple[bool, str | None]:
 
 def read_model_pills(page) -> list[str]:
     out = []
-    for el in page.query_selector_all('button.__composer-pill'):
+    for el in page.query_selector_all(', '.join(MODEL_SWITCHER_SELECTORS)):
         try:
             t = (el.inner_text() or "").strip()
-            if t:
+            if _visible_item(el) and t:
                 out.append(t)
         except Exception:
             continue
@@ -1171,7 +1218,8 @@ def _close_switcher(page) -> None:
     Escape가 가면 '응답 생성을 중지할까요?' 다이얼로그가 떠버린다(2026-08-18 실측)."""
     try:
         for _ in range(3):
-            if not page.query_selector(f'{INTELLIGENCE_PICKER_SELECTOR}, [role="menu"][data-state="open"]'):
+            if not any(_visible_item(el) for el in page.query_selector_all(
+                    f'{INTELLIGENCE_PICKER_SELECTOR}, [role="menu"][data-state="open"]')):
                 break
             page.keyboard.press("Escape")
             time.sleep(0.3)
@@ -1182,14 +1230,15 @@ def _close_switcher(page) -> None:
 def _open_switcher_raw(page) -> bool:
     """pill 클릭으로 팝오버만 연다(뷰 전환 없음). 이미 열려 있으면 그대로 True."""
     try:
-        if page.query_selector(INTELLIGENCE_PICKER_SELECTOR):
+        if any(_visible_item(el) for el in page.query_selector_all(
+                f'{INTELLIGENCE_PICKER_SELECTOR}, [role="menu"][data-state="open"]')):
             return True
     except Exception:
         pass
     for sel in MODEL_SWITCHER_SELECTORS:
         try:
             el = page.query_selector(sel)
-            if el:
+            if el and _visible_item(el):
                 el.click()
                 time.sleep(1.2)
                 return True
@@ -1205,32 +1254,76 @@ def _open_switcher(page):
     return False
 
 
+EFFORT_SLIDER_SELECTOR = (
+    '[data-model-picker-power-slider] [role="slider"], '
+    '[data-model-picker-power-slider][role="slider"], '
+    '[data-model-reasoning-effort-slider] [role="slider"], '
+    '[data-model-reasoning-effort-slider][role="slider"], '
+    f'{INTELLIGENCE_PICKER_SELECTOR} [role="slider"]'
+)
+EFFORT_ALIASES = {
+    "instant": "instant", "즉시": "instant",
+    "medium": "medium", "standard": "medium", "중간": "medium",
+    "high": "high", "높음": "high",
+    "extra high": "xhigh", "very high": "xhigh", "xhigh": "xhigh",
+    "extended": "xhigh", "매우 높음": "xhigh", "pro": "pro",
+}
+
+
+def normalize_effort(value: str) -> str | None:
+    return EFFORT_ALIASES.get(" ".join(value.strip().lower().split()))
+
+
+def _parse_effort(value: str) -> str:
+    normalized = normalize_effort(value)
+    if normalized is None:
+        raise argparse.ArgumentTypeError(f"지원하지 않는 추론단계: {value!r}")
+    return normalized
+
+
+class _EffortAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        previous = getattr(namespace, '_explicit_effort', None)
+        if previous is not None and previous != values:
+            parser.error('--model/--effort 추론단계가 서로 다릅니다')
+        setattr(namespace, '_explicit_effort', values)
+        setattr(namespace, self.dest, values)
+
+
+def _visible_item(el) -> bool:
+    # Playwright is_visible alone does not exclude inert/aria-hidden model panes.
+    return el.is_visible() and not el.evaluate("el => !!el.closest('[inert], [aria-hidden=\"true\"]')")
+
+
 def _slider_value(page) -> tuple[int | None, int | None]:
-    """새 UI 슬라이더의 (현재값, 최대값). 슬라이더 없으면 (None, None)."""
-    try:
-        r = page.evaluate("""() => {
-          const s = document.querySelector('[role="slider"]');
-          return s ? [ +s.getAttribute('aria-valuenow'), +s.getAttribute('aria-valuemax') ] : null;
-        }""")
-        return (r[0], r[1]) if r else (None, None)
-    except Exception:
-        return (None, None)
+    """Only read the active reasoning slider (its thumb itself may be aria-hidden)."""
+    for el in page.query_selector_all(EFFORT_SLIDER_SELECTOR):
+        if el.evaluate("""el => {
+            const control = el.closest('[role="menuitem"]');
+            return control && control.getClientRects().length > 0
+              && !el.parentElement.closest('[inert], [aria-hidden="true"]');
+        }"""):
+            try:
+                return int(el.get_attribute('aria-valuenow')), int(el.get_attribute('aria-valuemax'))
+            except (TypeError, ValueError):
+                pass
+    return None, None
 
 
 def _set_effort_slider(page, target_idx: int) -> bool:
-    """새 UI(2026-08): 추론단계 슬라이더를 target_idx로 이동.
-    서브메뉴 radio는 슬라이더 파티클 애니메이션의 상시 리렌더로 클릭이 detach 실패하므로
-    (일반/force/좌표 클릭 전부 무효 실측), 유일하게 안정적인 경로는
-    SliderControl 프로그램 focus + ArrowLeft/ArrowRight 키 입력이다."""
+    """Focus the keyboard control, not the aria-hidden slider thumb."""
     try:
         for _attempt in range(2):
             cur, mx = _slider_value(page)
-            if cur is None:
+            if cur is None or mx is None or not 0 <= target_idx <= mx:
                 return False
             if cur == target_idx:
                 return True
             ok = page.evaluate("""() => {
-              const c = document.querySelector('[data-model-reasoning-effort-slider]')?.closest('[role="menuitem"]');
+              const cs = [...document.querySelectorAll(
+                '[data-reasoning-slider="true"], [data-model-reasoning-effort-slider]')];
+              const c = cs.map(x => x.closest('[role="menuitem"]')).find(x => x
+                && !x.closest('[inert], [aria-hidden="true"]') && x.getClientRects().length);
               if (!c) return false;
               c.focus();
               return document.activeElement === c;
@@ -1247,9 +1340,19 @@ def _set_effort_slider(page, target_idx: int) -> bool:
         return False
 
 
-# 새 UI 슬라이더 인덱스 폴백 맵(서브메뉴 라벨을 못 읽었을 때만 사용).
-EFFORT_SLIDER_FALLBACK = {"즉시": 0, "중간": 1, "높음": 2, "매우 높음": 3, "pro": 4,
-                          "instant": 0, "standard": 1, "high": 2, "extended": 3}
+def _effort_label(text: str) -> str | None:
+    """A status is 'Pro, 5개 중 5번째.'; pills may prefix a model name.
+    Longest exact suffix first prevents High from matching Extra High.
+    """
+    label = text.split(',')[0].strip()
+    if normalize_effort(label):
+        return label
+    for alias in sorted(EFFORT_ALIASES, key=len, reverse=True):
+        if label.lower().endswith(' ' + alias):
+            prefix = label[:-len(alias)].strip()
+            if re.match(r'^(GPT[- ]?|[0-9]|o[0-9])', prefix, re.I):
+                return alias
+    return None
 
 
 def read_menu_state(page) -> dict:
@@ -1258,6 +1361,8 @@ def read_menu_state(page) -> dict:
     try:
         # 새 UI(2026-08): advanced 뷰의 '모델' 행 trailing span이 곧 활성 모델명(예: 'GPT-5.6 Sol').
         for it in page.query_selector_all('[role="menuitem"][data-has-submenu]'):
+            if not _visible_item(it):
+                continue
             t = (it.inner_text() or "").strip()
             if t.startswith("모델") or t.lower().startswith("model"):
                 sp = it.query_selector(".trailing span")
@@ -1272,6 +1377,8 @@ def read_menu_state(page) -> dict:
     try:
         # 한 번 순회하며 (1) 모델같은 항목 전부 수집, (2) aria-checked/selected된 활성 모델 검출
         for it in page.query_selector_all('[role="menuitem"], [role="menuitemradio"], [role="option"]'):
+            if not _visible_item(it):
+                continue
             is_checked = it.get_attribute("aria-checked") == "true" or it.get_attribute("aria-selected") == "true"
             t = (it.inner_text() or "").strip()
             if t and re.search(r"GPT|gpt|o\d|Claude|Gemini", t):
@@ -1289,7 +1396,11 @@ def read_menu_state(page) -> dict:
         pass
     try:
         for it in page.query_selector_all('[role="menuitemradio"]'):
+            if not _visible_item(it):
+                continue
             t = (it.inner_text() or "").strip()
+            if not normalize_effort(t):
+                continue
             state["items"].append(t)
             # 모델 서브메뉴가 펼쳐져 있으면 모델 radio(예: 'GPT-5.6 Sol')도 menuitemradio+checked로
             # 잡혀 추론단계 판정을 덮어쓴다 — 모델명 패턴은 effort 후보에서 제외.
@@ -1299,148 +1410,107 @@ def read_menu_state(page) -> dict:
                 state["effort_checked"] = t
     except Exception:
         pass
+    # New power menu exposes the active model only in this visible toggle.
+    for it in page.query_selector_all('[data-model-picker-view-toggle="true"]'):
+        if _visible_item(it):
+            name = (it.inner_text() or "").strip()
+            if name and not normalize_effort(name):
+                # '6 Pro' identifies a model family; 'Extra High' is effort only.
+                name = re.sub(r'\s+Pro$', '', name, flags=re.I)
+                state["model"], state["model_source"] = name, "checked"
+                if name not in state["models"]:
+                    state["models"].append(name)
+    for it in page.query_selector_all('[role="menu"][data-state="open"] [role="status"], '
+                                      f'{INTELLIGENCE_PICKER_SELECTOR} [role="status"]'):
+        if _visible_item(it):
+            label = _effort_label(it.inner_text() or "")
+            if label:
+                state["effort_checked"] = label
     return state
 
 
 def select_model(page, want: str, require_model: str | None = None) -> tuple[bool, str | None]:
-    """모델 스위처를 열고 want(추론단계, 예: 'pro')를 선택 + 검증.
-    require_model 지정 시 모델명(예: 'GPT-5.6')이 일치하지 않으면 False(실패) 반환.
-    반환: (verified, verified_model_name)"""
-    want_l = want.lower()
+    """Select the requested effort by meaning and verify before any transmission."""
+    requested = normalize_effort(want)
+    if requested is None:
+        print(f"  지원하지 않는 추론단계: {want!r} — 전송 중단")
+        return False, None
+    chat_ok, _mode = ensure_chat_mode(page)
+    if not chat_ok:
+        return False, None
     if not _open_switcher(page):
-        print("  ⚠️  모델 스위처를 못 찾음 → 기본 모델로 진행")
+        print("  모델 스위처 미확인 — 전송 중단")
         return False, None
 
     before = read_menu_state(page)
-    if before["model"]:
-        print(f"  메뉴 모델명: {before['model']!r} / 추론단계 목록: {before['items']}")
-
-    # require_model 검증 (모델명을 읽지 못했거나 모델명이 기대값과 다르면 즉시 중단)
-    if require_model:
-        if not before["model"]:
-            print(f"  ❌ 모델명 획득 실패 (require_model '{require_model}' 검증 불가) → 즉시 중단 (fail-closed)")
-            _close_switcher(page)
-            return False, None
-        if require_model.lower() not in before["model"].lower():
-            print(f"  ❌ 모델 불일치: 기대 '{require_model}' ≠ 메뉴 '{before['model']}' → 중단(전송 안 함)")
-            _close_switcher(page)
-            return False, None
-
-    # ---- 새 UI(2026-08, 슬라이더) 경로 ----
-    if page.query_selector(INTELLIGENCE_PICKER_SELECTOR):
-        items = before["items"]  # 예: ['즉시','중간','높음','매우 높음','Pro'] (advanced 서브메뉴 실측)
-        idx = None
-        label = None
-        for exact in (True, False):
-            for i, t in enumerate(items):
-                low = t.strip().lower()
-                if (exact and low == want_l) or (not exact and want_l in low):
-                    idx, label = i, t.strip()
-                    break
-            if idx is not None:
-                break
-        if idx is None:
-            # 서브메뉴 라벨을 못 읽은 경우 폴백: pro=슬라이더 최댓값, 그 외 고정 맵
-            _cur, mx = _slider_value(page)
-            if want_l == "pro" and mx is not None:
-                idx, label = mx, "Pro"
-            elif want_l in EFFORT_SLIDER_FALLBACK:
-                idx, label = EFFORT_SLIDER_FALLBACK[want_l], want
-        if idx is None:
-            print(f"  ⚠️  '{want}' 추론단계 항목 못 찾음(슬라이더 UI) → 기본값")
-            _close_switcher(page)
-            return False, None
-
-        # 서브메뉴가 열린 advanced 뷰에선 슬라이더 키 입력이 불안정 → 닫고 simple 뷰로 재오픈
+    if require_model and (before.get("model_source") != "checked" or not before["model"]
+                          or require_model.lower() not in before["model"].lower()):
         _close_switcher(page)
-        time.sleep(0.5)
+        return False, None
+
+    cur, mx = _slider_value(page)
+    if cur is not None or page.query_selector(INTELLIGENCE_PICKER_SELECTOR):
+        # Return legacy advanced menus to their keyboard-operable simple view.
+        _close_switcher(page)
         if not _open_switcher_raw(page):
-            print("  ⚠️  슬라이더 재오픈 실패")
             return False, None
-        slider_ok = _set_effort_slider(page, idx)
+        cur, mx = _slider_value(page)
+        if cur is None or mx is None or not 0 <= cur <= mx <= 10:
+            _close_switcher(page)
+            return False, None
+        # Preferred position is only a probe, never proof (in particular max != Pro).
+        preferred = ["instant", "medium", "high", "xhigh", "pro"].index(requested)
+        candidates = list(dict.fromkeys([preferred, cur] + list(range(mx + 1))))
+        selected = False
+        label = None
+        state = before
+        for idx in candidates:
+            if idx > mx or not _set_effort_slider(page, idx):
+                continue
+            state = read_menu_state(page)
+            label = state["effort_checked"]
+            if not label:
+                label = next((label for pill in read_model_pills(page)
+                              if (label := _effort_label(pill))), None)
+            if label and normalize_effort(label) == requested:
+                selected = True
+                break
         _close_switcher(page)
-        time.sleep(0.5)
-
-        pills = read_model_pills(page)
-        pill_txt = pills[0] if pills else ""
-        effort_verified = slider_ok and (pill_txt == label or want_l in pill_txt.lower())
-        # 모델 검증은 advanced 뷰에서 읽은 before(model_source='checked') 기준
-        model_verified = True
+        # Independently verify the final closed pill; numeric movement is not enough.
+        verified = selected and any(normalize_effort(_effort_label(pill) or "") == requested
+                                    for pill in read_model_pills(page))
         if require_model:
-            model_verified = (before["model"] is not None
-                              and require_model.lower() in before["model"].lower()
-                              and before.get("model_source") == "checked")
-        verified = model_verified and effort_verified
-        verified_model_name = f"{before['model'] or 'Unknown Model'} ({pill_txt or label})"
-        print(f"  {'✓' if verified else '⚠️'} 최종 모델 검증(슬라이더): model={before['model']} (기대:{require_model}), "
-              f"effort=슬라이더 {idx}({pill_txt or '?'}) (기대:{want}) -> 결과={'OK' if verified else '실패'}")
-        return verified, verified_model_name
+            verified = verified and state.get('model_source') == 'checked' and bool(
+                state['model'] and require_model.lower() in state['model'].lower())
+        return verified, f"{state['model'] or 'Unknown Model'} ({label or want})"
 
-    # ---- 구 UI(radio 메뉴) 경로 ----
-    # 추론단계 클릭 대상 탐색
-    clicked = None
-    cands = []
+    # Legacy radio menu: exact normalized labels only, never model/Latest radios.
+    clicked = False
     for sel in EFFORT_ITEM_SELECTORS:
-        try:
-            cands.extend(page.query_selector_all(sel))
-        except Exception:
-            continue
-
-    for exact in (True, False):
-        for it in cands:
+        for it in page.query_selector_all(sel):
+            if not _visible_item(it) or it.get_attribute("aria-haspopup"):
+                continue
+            if normalize_effort((it.inner_text() or "").strip()) != requested:
+                continue
             try:
-                # 서브메뉴 트리거(예: '추론 강도Pro' 행)는 클릭 대상이 아님 — 오클릭 방지.
-                if it.get_attribute("aria-haspopup"):
-                    continue
-                t = (it.inner_text() or "").strip()
-                low = t.lower()
-                if (exact and low == want_l) or (not exact and want_l in low):
-                    try:
-                        it.click(timeout=4000)
-                    except Exception:
-                        # 새 UI 서브메뉴는 애니메이션 탓에 액션ability 체크에 걸린다(2026-08-18 실측) → force 폴백
-                        it.click(force=True, timeout=4000)
-                    clicked = t.splitlines()[0][:40]
-                    time.sleep(1.5)  # 클릭 후 드롭다운이 닫히는 시간 대기
-                    break
+                it.click(timeout=4000)
+                time.sleep(0.5)
+                clicked = True
+                break
             except Exception:
                 continue
         if clicked:
             break
-
-    if not clicked:
-        print(f"  ⚠️  '{want}' 추론단계 항목 못 찾음 → 기본값")
+    if not clicked or not _open_switcher(page):
         _close_switcher(page)
         return False, None
-
-    # Pro 제안: 메뉴 재오픈하여 effort_checked 및 model_checked 상태 검증
-    if not _open_switcher(page):
-        print("  ⚠️  선택 상태 검증을 위해 메뉴 재오픈 실패")
-        return False, None
-
     after = read_menu_state(page)
     _close_switcher(page)
-    time.sleep(0.5)
-
-    model_verified = True
-    if require_model:
-        name_ok = after["model"] is not None and require_model.lower() in after["model"].lower()
-        # 폴백(활성표시 없음)으로 잡은 모델명은 메뉴에 모델이 여러 개일 때 신뢰 불가 → fail-closed.
-        # 활성표시(checked)거나 메뉴에 모델이 하나뿐이면 폴백이라도 안전(= 활성 모델).
-        src_ok = (after.get("model_source") == "checked") or (len(after.get("models") or []) <= 1)
-        model_verified = name_ok and src_ok
-        if name_ok and not src_ok:
-            print(f"  ❌ 활성 모델 확정 불가(체크표시 없음 + 메뉴에 모델 {len(after['models'])}개: {after['models']}) → fail-closed")
-
-    effort_verified = after["effort_checked"] is not None and want_l in after["effort_checked"].lower()
-    verified = model_verified and effort_verified
-
-    verified_model = after["model"] or "Unknown Model"
-    verified_effort = after["effort_checked"] or "Default"
-    verified_model_name = f"{verified_model} ({verified_effort})"
-
-    print(f"  {'✓' if verified else '⚠️'} 최종 모델 검증: model={after['model']} (기대:{require_model}), effort={after['effort_checked']} (기대:{want}) -> 결과={'OK' if verified else '실패'}")
-    return verified, verified_model_name
+    model_ok = not require_model or (after.get("model_source") == "checked"
+                                    and after["model"] is not None
+                                    and require_model.lower() in after["model"].lower())
+    verified = model_ok and normalize_effort(after["effort_checked"] or "") == requested
+    return verified, f"{after['model'] or 'Unknown Model'} ({after['effort_checked'] or 'Unknown Effort'})"
 
 
 # ---- 첨부 / 입력 / 전송 ----
@@ -1457,7 +1527,11 @@ def attach_file(page, path: Path) -> bool:
         
         # composer 내부 영역(form 또는 textarea의 presentation 부모)으로 locator 한정
         # ChatGPT UI에서 파일 첨부 칩이 노출되는 영역
-        composer = page.locator("form:has(#prompt-textarea), [role='presentation']:has(#prompt-textarea)").first
+        composer = page.locator(
+            "form:has(#prompt-textarea), [role='presentation']:has(#prompt-textarea), "
+            "form:has([role='textbox'][contenteditable='true']), "
+            "[role='presentation']:has([role='textbox'][contenteditable='true'])"
+        ).first
         
         for _ in range(40):
             time.sleep(1)
@@ -2237,7 +2311,8 @@ def main():
                     help="첨부 강제 — 첨부 실패 시 붙여넣기 폴백 없이 중단(기본은 작은 pack에 한해 인라인 폴백)")
     ap.add_argument("--prompt", default=None)
     ap.add_argument("--prompt-file", default=None)
-    ap.add_argument("--model", default=None, help='추론단계 선택(예: "pro")')
+    ap.add_argument("--model", "--effort", dest="model", default="pro", type=_parse_effort, action=_EffortAction,
+                    help='추론단계 선택(기본 pro; 명시한 한국어/영어 단계 우선)')
     ap.add_argument("--require-model", default=None,
                     help='모델명 검증(예: "GPT-5.6") — 불일치 시 전송 중단')
     ap.add_argument("--force-answer-after", type=int, default=None,
@@ -2320,11 +2395,7 @@ def main():
             sys.exit(0)
         sys.exit("❌ 브라우저 실행/CDP 확인 실패")
 
-    # --require-model은 모델 검증 경로(select_model)에서만 효력 → --model 없이 단독 사용 시 검증이 통째로
-    # 스킵되는 fail-open을 차단(fail-closed). 모델/추론단계를 함께 지정해야 검증이 돈다.
-    if args.require_model and not args.model:
-        sys.exit('❌ --require-model은 --model과 함께 써야 합니다(모델/추론단계를 선택·검증하는 경로).\n'
-                 '     예: --model pro --require-model "GPT-5.6"')
+    # --require-model 단독도 기본 effort=pro의 선택·검증 경로에서 적용된다.
 
     # --harvest: 전송 없이 기존 대화에서 회수만 — 패킹/프롬프트/프로젝트 진입 불필요
     harvest_url = None
@@ -2514,7 +2585,7 @@ def main():
                         # Chat/Work 게이트 — 모델 스위처를 열기 '전에' 보정한다.
                         # Work 모드엔 Pro 눈금 자체가 없어 슬라이더 인덱스 계산이 무의미해진다.
                         chat_ok, seen_mode = ensure_chat_mode(page)
-                        if not chat_ok and (args.model or "").lower() == "pro":
+                        if not chat_ok:
                             raise RuntimeError(
                                 f"Chat 모드 전환 실패(현재='{seen_mode or '미상'}') — Work 모드엔 Pro가 없다 → 전송 중단(fail-closed)")
 
