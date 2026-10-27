@@ -303,6 +303,29 @@ class EffortUITests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(name, 'Unknown Model (Extra High)')
 
+    def test_closed_pill_with_label_line_verifies(self):
+        # Live 2026-10-27: the closed pill reads '추론 수준\nExtra High'.
+        html = slider_html(initial=4).replace(
+            'trigger.textContent=labels[idx];',
+            "trigger.innerHTML='<div>추론 수준</div><div>'+labels[idx]+'</div>';")
+        self.load(html)
+        ok, name = review.select_model(self.page, '매우 높음')
+        self.assertTrue(ok, name)
+        self.assertEqual(self.page.locator('#trigger').inner_text(), '추론 수준\nExtra High')
+
+    def test_effort_label_cases(self):
+        for text, expected in [('추론 수준\nExtra High', 'xhigh'), ('추론 수준\nHigh', 'high'),
+                               ('Reasoning\nPro', 'pro'), ('Thinking: Extra High', 'xhigh'),
+                               ('Extra High', 'xhigh'), ('High', 'high'),
+                               ('Pro, 5개 중 5번째.', 'pro'),
+                               ('Extra High, 5개 중 4번째입니다.', 'xhigh'),
+                               ('GPT-6 Sol Extra High', 'xhigh'), ('GPT-6 Sol High', 'high'),
+                               ('GPT-6', None), ('GPT-5.6 Sol', None), ('Latest', None),
+                               ('추론 수준', None), ('', None), ('Extra High\nGPT-6', None),
+                               ('Super High', None)]:
+            with self.subTest(text=text):
+                self.assertEqual(review.normalize_effort(review._effort_label(text) or ''), expected)
+
     def test_legacy_advanced_view_keeps_keyboard_slider_path(self):
         html = slider_html(legacy=True).replace(
             '<div role="status"', '<div role="menuitem" id="advanced">고급</div><div role="status"')

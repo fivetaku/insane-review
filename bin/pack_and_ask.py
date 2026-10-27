@@ -1345,17 +1345,27 @@ def _set_effort_slider(page, target_idx: int) -> bool:
         return False
 
 
+EFFORT_LABEL_PREFIXES = ("추론 수준", "추론 강도", "추론", "reasoning level", "reasoning effort",
+                         "reasoning", "thinking", "effort")
+
+
 def _effort_label(text: str) -> str | None:
     """A status is 'Pro, 5개 중 5번째.'; pills may prefix a model name.
+    Live 2026-10-27: the closed pill reads '추론 수준\\nExtra High' (label line + value line),
+    so only the last non-empty line is the value.
     Longest exact suffix first prevents High from matching Extra High.
     """
-    label = text.split(',')[0].strip()
+    lines = [ln.strip() for ln in text.split(',')[0].splitlines() if ln.strip()]
+    if not lines:
+        return None
+    label = lines[-1]
     if normalize_effort(label):
         return label
     for alias in sorted(EFFORT_ALIASES, key=len, reverse=True):
         if label.lower().endswith(' ' + alias):
             prefix = label[:-len(alias)].strip()
-            if re.match(r'^(GPT[- ]?|[0-9]|o[0-9])', prefix, re.I):
+            if (re.match(r'^(GPT[- ]?|[0-9]|o[0-9])', prefix, re.I)
+                    or prefix.lower().rstrip(':') in EFFORT_LABEL_PREFIXES):
                 return alias
     return None
 
