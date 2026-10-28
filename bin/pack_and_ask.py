@@ -720,11 +720,23 @@ def probe_login() -> dict:
                 return res
 
             res["cookie"], res["cookie_exp"] = _cookie_state(ctx)
-            page = ctx.new_page()
-            hide_browser_if_background()  # 새 탭 생성이 앱을 앞으로 끌어올리므로 즉시 재숨김
+            # 사용자가 로그인 중일 수 있는 기존 chatgpt.com 탭은 재사용한다(빼앗거나 새로고침하지 않음).
+            page = None
+            for p in ctx.pages:
+                try:
+                    if "chatgpt.com" in (p.url or ""):
+                        page = p
+                        break
+                except Exception:
+                    pass
+            created = page is None
+            if created:
+                page = ctx.new_page()
+                hide_browser_if_background()  # 새 탭 생성이 앱을 앞으로 끌어올리므로 즉시 재숨김
             _guard_dialogs(ctx, page)
             try:
-                page.goto(CHATGPT_URL, wait_until="load", timeout=30000)
+                if created:
+                    page.goto(CHATGPT_URL, wait_until="load", timeout=30000)
                 res["login"] = login_state(page, wait_secs=15)
                 if res["login"] == "ok":
                     # Chat/Work는 sticky이고 Work엔 Pro가 없다 — 진단에 현재 모드를 노출.
@@ -737,10 +749,13 @@ def probe_login() -> dict:
                         time.sleep(0.5)
                     res["mode"] = "none" if m is None else (m or "unknown")
             finally:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+                # 로그인이 확인된(ok) 새 탭만 닫는다. no/unknown이면 사용자가 그 탭에서
+                # 로그인해야 하므로 남기고, 다음 점검이 위에서 재사용한다. 마지막 탭은 창째 닫히므로 두지 않는다.
+                if created and res["login"] == "ok" and len(ctx.pages) > 1:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
     except Exception:
         pass
     return res
@@ -1397,7 +1412,9 @@ def read_menu_state(page) -> dict:
             is_checked = it.get_attribute("aria-checked") == "true" or it.get_attribute("aria-selected") == "true"
             t = (it.inner_text() or "").strip()
             if t and re.search(r"GPT|gpt|o\d|Claude|Gemini", t):
-                name = t.splitlines()[0][:40]
+                # '모델\nGPT-5.6 Sol'처럼 라벨 줄 + 값 줄로 오면 모델 패턴이 맞는 줄을 이름으로 쓴다.
+                lines = [l.strip() for l in t.splitlines() if l.strip()]
+                name = next((l for l in lines if re.search(r"GPT|gpt|o\d|Claude|Gemini", l)), lines[0])[:40]
                 if name not in state["models"]:
                     state["models"].append(name)
                 if is_checked and not state["model"]:
@@ -1751,6 +1768,19 @@ def click_answer_now(page) -> bool:
     return try_answer()
 
 
+def answer_now_present(page) -> bool:
+    """'지금 답변 받기' 어포던스가 DOM에 있는지 — 클릭 실패와 '버튼 부재'를 구분한다."""
+    try:
+        if page.query_selector(ANSWER_NOW_ROW_SELECTOR):
+            return True
+        for b in page.query_selector_all('button, [role="button"]'):
+            if ANSWER_NOW_TEXT_RE.search(b.inner_text() or ""):
+                return True
+    except Exception:
+        return True  # 판정 불가면 기존처럼 재시도
+    return False
+
+
 def wait_for_turn_response(page, force_after=None, max_wait=None,
                            base_user: int = 0, base_assistant: int = 0, base_copy: int = 0,
                            conv_url: str | None = None, base_ids: set | None = None,
@@ -1834,7 +1864,13 @@ def wait_for_turn_response(page, force_after=None, max_wait=None,
                 force_tries = FORCE_MAX_TRIES  # 성공 → 그만
             else:
                 force_tries += 1
-                if force_tries >= FORCE_MAX_TRIES:
+                if not answer_now_present(page):
+                    # 대상이 DOM에 없으면 재시도는 의미가 없다(2026-08 UI에서 제거 실측, #6).
+                    print(f"    ⚠️  {elapsed}s — 이 UI에 '지금 답변 받기' 버튼이 없음 → --force-answer-after 무효, 자연완료 대기")
+                    force_tries = FORCE_MAX_TRIES
+                elif force_tries == 1:
+                    print(f"    ⚠️  {elapsed}s — '지금 답변 받기' 클릭 실패 → 재시도(최대 {FORCE_MAX_TRIES}회)")
+                elif force_tries >= FORCE_MAX_TRIES:
                     print(f"    ⚠️  {elapsed}s — '지금 답변 받기' 버튼 {FORCE_MAX_TRIES}회 실패 → 자연완료 대기")
 
         # 대상 턴(신규 assistant 노드)과 종결 신호 — 게이트별로 로그에 남겨 막힌 predicate를 바로 알 수 있게
@@ -2370,6 +2406,8 @@ def main():
                     help="agent-council 멤버 모드: 로그는 stderr, 응답만 stdout")
     ap.add_argument("--harvest", default=None, metavar="CHAT_URL|MANIFEST",
                     help="전송 없이 기존 대화에서 완료된 응답만 회수(타임아웃 시 안내된 대화 URL 또는 manifest_*.json 경로)")
+    ap.add_argument("--continue-chat", default=None, metavar="CHAT_URL|MANIFEST",
+                    help="기존 대화에 후속 메시지를 보내고 그 턴만 회수(새 채팅·첨부 없음)")
     ap.add_argument("--retries", type=int, default=1)
     ap.add_argument("prompt_args", nargs="*", help="프롬프트(위치인자 — council 호환)")
     args = ap.parse_args()
@@ -2434,6 +2472,23 @@ def main():
         if not harvest_url or not CONV_URL_RE.search(harvest_url):
             sys.exit(f"❌ --harvest 인자가 대화 URL(/c/<id>)이 아님: {args.harvest}")
         args.target = None  # 회수 모드는 전송이 없다 — 패킹 생략
+
+    # --continue-chat: 결속된 대화에 이어 보낸다. 컨텍스트가 대화에 남으므로 전체를 다시 보낼 필요가 없다.
+    continue_url = None
+    if args.continue_chat:
+        if harvest_url:
+            sys.exit("❌ --harvest(회수 전용)와 --continue-chat(전송)은 함께 쓸 수 없습니다.")
+        _c = Path(args.continue_chat).expanduser()
+        if _c.exists():
+            try:
+                continue_url = json.loads(_c.read_text(encoding="utf-8")).get("chat_url")
+            except Exception:
+                sys.exit(f"❌ manifest 파싱 실패: {_c}")
+        else:
+            continue_url = args.continue_chat
+        if not continue_url or not CONV_URL_RE.search(continue_url):
+            sys.exit(f"❌ --continue-chat 인자가 대화 URL(/c/<id>)이 아님: {args.continue_chat}")
+        args.target = None  # 이어 보내기는 첨부 없이 프롬프트만 보낸다
 
     real_stdout = sys.stdout
     if args.council:
@@ -2515,8 +2570,9 @@ def main():
     print("\n[3/3] ChatGPT 투입 & 응답 회수")
     print("  ⚠️  회수가 끝날 때까지 전용 브라우저 창을 조작하지 마세요(이탈 시 자동 복귀하지만 오염 위험)")
     response = ""
-    conv_url = harvest_url          # 결속된 대화 URL — 있으면 이후 시도는 '회수 재시도'(재전송 금지)
+    conv_url = harvest_url or continue_url  # 결속된 대화 URL — 있으면 이후 시도는 '회수 재시도'(재전송 금지)
     base_ids_snapshot: set | None = (set() if harvest_url else None)
+    continue_sent = False           # 이어 보내기는 판당 정확히 한 번 — 재시도는 회수만(중복 전송 = 메시지 이중 소모)
     sent_unknown = False
     quota_hit = False
     manifest_path = out_dir / f"manifest_{label}_{run_tag}.json"
@@ -2546,14 +2602,37 @@ def main():
                     if conv_url:
                         # ── 회수 경로(재전송 없음): 결속된 대화 URL로 가서 이어서/다시 대기 ──
                         # 타임아웃·예외 후 재시도와 --harvest가 모두 이 경로 — 중복 채팅 생성 원천 차단.
-                        print(f"  🔁 회수 모드(재전송 없음): {conv_url}")
+                        sending = bool(continue_url) and not continue_sent
+                        print(f"  ➕ 이어 보내기: {conv_url}" if sending else f"  🔁 회수 모드(재전송 없음): {conv_url}")
                         page.goto(conv_url, wait_until="load", timeout=60000)
                         time.sleep(2)
                         if login_state(page) == "no":
                             raise RuntimeError("ChatGPT 로그인 벽 감지 — 해당 브라우저에서 chatgpt.com 로그인 확인")
+                        base_user = base_assistant = base_copy = 0
+                        if sending:
+                            for _ in range(10):
+                                if find_input(page):
+                                    break
+                                time.sleep(1)
+                            if find_input(page) is None:
+                                raise RuntimeError("이어 보낼 대화의 입력창 미확인 → 전송 중단(fail-closed)")
+                            base_user = count_msgs_strict(page, USER_MSG_SELECTORS)
+                            base_assistant = count_msgs_strict(page, ASSISTANT_MSG_SELECTORS)
+                            base_copy = count_msgs_strict(page, COPY_BTN_SELECTORS)
+                            base_ids_snapshot = msg_id_set(page)
+                            put_text(page, prompt)
+                            if not composer_has_prompt(page, prompt):
+                                clear_composer(page)
+                                put_text(page, prompt)
+                                if not composer_has_prompt(page, prompt):
+                                    raise RuntimeError("프롬프트가 입력창에 온전히 안 들어감 → 중단(fail-closed)")
+                            click_send(page)
+                            continue_sent = True
+                            print("  ✓ 이어 보냄 — 새 채팅을 만들지 않았다")
                         status, text, conv_url = wait_for_turn_response(
                             page, force_after=args.force_answer_after, max_wait=mw_eff,
-                            conv_url=conv_url, base_ids=base_ids_snapshot, skip_sent_check=True)
+                            base_user=base_user, base_assistant=base_assistant, base_copy=base_copy,
+                            conv_url=conv_url, base_ids=base_ids_snapshot, skip_sent_check=not sending)
                         if status == "quota":
                             print("  ⛔ 사용량 한도 감지 — 회수 재시도 중단(한도 해제 후 --harvest 재실행)")
                             break
