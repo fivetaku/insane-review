@@ -919,10 +919,16 @@ def new_assistant_node(page, base_ids: set | None, base_assistant: int = 0):
         fresh = []
         for n in nodes:
             identity = n.get_attribute('data-message-id')
-            if not identity and n.get_attribute('data-content-search-unit-key'):
+            idents = {identity} if identity else set()
+            if not idents and n.get_attribute('data-content-search-unit-key'):
                 body = n.query_selector('[data-chatgpt-selection-message-id]')
                 identity = body.get_attribute('data-chatgpt-selection-message-id') if body else None
-            if identity and identity not in base_ids:
+                if identity:
+                    idents = {identity}
+                else:
+                    # 2026-11 UI: selection-message-id 소멸, 턴 노드 자신의 search-message-ids(공백 구분)만 남음
+                    idents = set((n.get_attribute('data-chatgpt-search-message-ids') or '').split())
+            if idents and not idents <= base_ids:
                 fresh.append(n)
         return fresh[-1] if fresh else None
     except Exception:
@@ -2820,4 +2826,16 @@ def main():
 
 
 if __name__ == "__main__":
+    # SIGTERM/SIGHUP(백그라운드 시간 제한·timeout·터미널 종료)도 finally의 page.close()를 거치게 한다.
+    # 기본 동작은 finally 없이 즉사라 회수 탭이 남고, 다음 --harvest가 같은 채팅을 새 탭으로 또 연다(탭 중복).
+    import signal
+
+    def _graceful_exit(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(_sig, _graceful_exit)
+        except (ValueError, OSError, AttributeError):
+            pass
     main()
