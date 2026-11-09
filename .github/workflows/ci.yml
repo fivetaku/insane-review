@@ -6,3 +6,9 @@ on:
 jobs:
   plugin:
     uses: fivetaku/.github/.github/workflows/plugin-check.yml@main
+    with:
+      # 오프라인 UI 회귀(bin/test_effort_ui.py): 로컬 HTML을 headless Chromium으로 연다. 외부 요청 없음.
+      python-packages: playwright
+      test-command: |
+        python3 -m playwright install --with-deps chromium
+        python3 -m unittest discover -s bin -p 'test_*.py'
