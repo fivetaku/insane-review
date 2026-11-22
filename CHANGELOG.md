@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0 — 2026-11-22
+- Severity-ordered review prompt with file:line and confidence
+- Local re-verification of each finding
+
 ## 0.6.15 — 2026-11-04
 - **답변이 다 나왔는데 회수하지 못하던 문제 수정.** 2026-11 ChatGPT 화면에서 답변 노드의 `data-message-id`·`data-chatgpt-selection-message-id`가 사라지고 `data-chatgpt-search-message-ids`만 남아, 새 답변 판별이 항상 실패했다. 그 결과 `fresh_len=0`으로 "렌더 스톨" 재로드를 3회 한 뒤 최대 대기(55~60분)를 소진하고 실패했다. 이제 이 속성의 id 집합으로도 새 답변을 판별한다.
 - **강제 종료 때 회수 탭이 남아 같은 채팅이 두 번씩 열리던 문제 수정.** SIGTERM·SIGHUP(백그라운드 시간 제한, `timeout`)을 받으면 `finally`를 건너뛰고 즉사해 탭이 남았다. 이제 정상 종료 경로로 탭을 닫는다.
