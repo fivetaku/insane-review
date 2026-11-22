@@ -1,6 +1,6 @@
 # GPT Pro를 agent-council 웹 전용 멤버로 등록
 
-GPT Pro(현 플래그십 — 지금은 GPT-5.6 Sol — 의 Pro 추론단계)는 API가 없어 기존 council 멤버(claude/codex/gemini, 전부 CLI/API)로는 못 넣는다.
+GPT Pro(현 플래그십 모델의 Pro 추론단계)는 API가 없어 기존 council 멤버(claude/codex/gemini, 전부 CLI/API)로는 못 넣는다.
 insane-review의 `--council` 모드가 그 간극을 메운다 — **프롬프트를 위치인자로 받고, 응답만 stdout으로** 내보내(진행 로그는 stderr) council worker가 `output.txt`로 그대로 캡처한다.
 
 ## 작동 방식 (council worker 계약)

@@ -9,7 +9,7 @@ insane-review — repomix 패킹 → 구독 ChatGPT(웹) GPT Pro(최신 플래�
   4) 턴 단위로 응답 완료를 판정(stop-button 사라짐 + copy 버튼 등장 + 텍스트 안정) → 회수
   5) 응답을 .md로 원자적 저장
 
-v2 (2026-06-20): GPT-5.5 Pro 리뷰 반영 — 턴-스코프 판정, 모델 검증, fail-closed CDP/로그인,
+v2 (2026-06-20): GPT Pro 리뷰 반영 — 턴-스코프 판정, 모델 검증, fail-closed CDP/로그인,
 force-answer 재시도, UUID/PID 파일명, repomix 버전 핀+timeout, 권한/시크릿, env 설정화.
 """
 
@@ -205,11 +205,22 @@ OUT_DIR = Path(os.environ["INSANE_REVIEW_OUT"]).expanduser() if os.environ.get("
     else Path.cwd() / ".insane-review"
 
 DEFAULT_PROMPT = (
-    "첨부는 repomix로 패킹한 코드베이스입니다. 다음을 한국어로 분석해줘:\n"
-    "1) 이 프로젝트가 하는 일과 전체 아키텍처\n"
-    "2) 핵심 모듈 간 데이터 흐름\n"
-    "3) 잠재적 버그/리스크 또는 개선점 3가지 (근거 파일 경로 포함)\n"
-    "결론부터 말하고 근거는 그 뒤에."
+    "첨부는 repomix로 패킹한 코드베이스입니다(라인번호 포함). 한국어로 코드 리뷰를 해줘.\n"
+    "\n"
+    "1) 결론 먼저: 가장 중요한 문제가 무엇인지(또는 문제가 없는지) 두세 문장으로.\n"
+    "2) 발견 사항을 심각도 순으로 나열:\n"
+    "   - P0: 크래시·데이터 손실·보안 취약점\n"
+    "   - P1: 잘못된 동작(스펙·의도와 다른 결과)\n"
+    "   - P2: 유지보수성(중복·혼란스러운 구조·테스트 부재 등)\n"
+    "   각 발견 사항마다 반드시:\n"
+    "   - 위치: `파일:라인` (첨부의 라인번호 기준)\n"
+    "   - 인용: 해당 코드를 그대로 인용\n"
+    "   - 왜 틀렸는지\n"
+    "   - 구체적인 실패 시나리오(입력·상태 → 결과), 또는 이 지적이 틀렸다면 무엇으로 반박되는지\n"
+    "   - 확신도: high / med / low\n"
+    "3) 해당 심각도에 실제 문제가 없으면 \"발견 없음\"이라고 쓴다. 개수를 채우려고 지어내거나 부풀리지 않는다.\n"
+    "   코드에서 확인하지 못한 동작은 추측이라고 밝힌다.\n"
+    "4) 마지막에 아키텍처·데이터 흐름 요약을 5줄 이내로 짧게."
 )
 
 
@@ -1120,20 +1131,20 @@ MODEL_SWITCHER_SELECTORS = [
     'button[aria-label*="model" i]',
 ]
 # 실측(2026-07-10): pill 클릭 → menuitemradio(즉시/중간/높음/매우 높음/Pro=추론단계)
-#   + menuitem("GPT-5.6 Sol"=모델 서브메뉴 트리거). 트리거를 hover하면 모델 radio들
-#   (GPT-5.6 Sol/GPT-5.5/GPT-5.4/GPT-5.3/o3)이 같은 메뉴 DOM에 menuitemradio로 추가된다.
+#   + menuitem(현재 모델명 = 모델 서브메뉴 트리거). 트리거를 hover하면 모델 radio들
+#   (현재·이전 세대 모델명 목록)이 같은 메뉴 DOM에 menuitemradio로 추가된다.
 # 실측(2026-08-18): UI 개편 — pill 팝오버가 슬라이더(simple 뷰)로 열린다.
 #   [data-testid="composer-intelligence-picker-content"] 안에 '고급' menuitem이 있고,
 #   클릭하면 advanced 뷰('모델' / '추론 강도' 서브메뉴 트리거)로 전환된다.
 #   '추론 강도'를 hover하면 옛 menuitemradio 목록(즉시/중간/높음/매우 높음/Pro)이 그대로 뜬다.
-#   활성 모델명은 '모델' 행의 trailing span(예: 'GPT-5.6 Sol')에 표시된다.
+#   활성 모델명은 '모델' 행의 trailing span(예: '<현재 모델명>')에 표시된다.
 EFFORT_ITEM_SELECTORS = ['[role="menuitemradio"]', '[role="menuitem"]', '[role="option"]']
 INTELLIGENCE_PICKER_SELECTOR = '[data-testid="composer-intelligence-picker-content"]'
 
 # ---- Chat / Work 모드 (실측 2026-08-29) ----
 # 헤더 중앙 radiogroup에 'Chat'/'Work' 라디오 2개. URL·_account 쿠키가 동일해
 # workspace_id 결속으로는 구분되지 않는다. Work 모드엔 Pro 추론단계가 아예 없고
-# (슬라이더에 Pro 눈금 부재, data-max="false") pill이 '5.6 Sol 매우 높음'으로 뜬다.
+# (슬라이더에 Pro 눈금 부재, data-max="false") pill이 '<모델명> 매우 높음'으로 뜬다.
 # 선택은 sticky — 사람이 웹에서 Work로 바꿔 쓰면 이후 자동 실행이 조용히 비-Pro로 나간다.
 MODE_RADIO_SELECTOR = ('[role="radiogroup"] [role="radio"], '
                        '[role="group"][aria-label="작성기 모드"] button[aria-pressed], '
@@ -1395,7 +1406,7 @@ def read_menu_state(page) -> dict:
     """열린 메뉴에서 모델명(menuitem 중 checked/selected) + 체크된 추론단계(menuitemradio aria-checked)를 읽는다."""
     state = {"model": None, "model_source": None, "models": [], "effort_checked": None, "items": []}
     try:
-        # 새 UI(2026-08): advanced 뷰의 '모델' 행 trailing span이 곧 활성 모델명(예: 'GPT-5.6 Sol').
+        # 새 UI(2026-08): advanced 뷰의 '모델' 행 trailing span이 곧 활성 모델명(예: '<현재 모델명>').
         for it in page.query_selector_all('[role="menuitem"][data-has-submenu]'):
             if not _visible_item(it):
                 continue
@@ -1418,7 +1429,7 @@ def read_menu_state(page) -> dict:
             is_checked = it.get_attribute("aria-checked") == "true" or it.get_attribute("aria-selected") == "true"
             t = (it.inner_text() or "").strip()
             if t and re.search(r"GPT|gpt|o\d|Claude|Gemini", t):
-                # '모델\nGPT-5.6 Sol'처럼 라벨 줄 + 값 줄로 오면 모델 패턴이 맞는 줄을 이름으로 쓴다.
+                # '모델\n<모델명>'처럼 라벨 줄 + 값 줄로 오면 모델 패턴이 맞는 줄을 이름으로 쓴다.
                 lines = [l.strip() for l in t.splitlines() if l.strip()]
                 name = next((l for l in lines if re.search(r"GPT|gpt|o\d|Claude|Gemini", l)), lines[0])[:40]
                 if name not in state["models"]:
@@ -1440,7 +1451,7 @@ def read_menu_state(page) -> dict:
             if not normalize_effort(t):
                 continue
             state["items"].append(t)
-            # 모델 서브메뉴가 펼쳐져 있으면 모델 radio(예: 'GPT-5.6 Sol')도 menuitemradio+checked로
+            # 모델 서브메뉴가 펼쳐져 있으면 모델 radio(예: '<모델명>')도 menuitemradio+checked로
             # 잡혀 추론단계 판정을 덮어쓴다 — 모델명 패턴은 effort 후보에서 제외.
             if re.search(r"GPT|gpt|o\d|Claude|Gemini", t):
                 continue
@@ -2379,7 +2390,7 @@ def main():
     ap.add_argument("--model", "--effort", dest="model", default="pro", type=_parse_effort, action=_EffortAction,
                     help='추론단계 선택(기본 pro; 명시한 한국어/영어 단계 우선)')
     ap.add_argument("--require-model", default=None,
-                    help='모델명 검증(예: "GPT-5.6") — 불일치 시 전송 중단')
+                    help='모델명 검증(화면에 보이는 모델명 일부, 예: "<모델명>") — 불일치 시 전송 중단')
     ap.add_argument("--force-answer-after", type=int, default=None,
                     help="N초 후 리즈닝 중이면 '지금 답변 받기' 재시도")
     ap.add_argument("--max-wait", type=int, default=None,
