@@ -28,6 +28,8 @@ GPT Pro lives only in the ChatGPT web app (subscription) — there is no officia
 /plugin install insane-review
 ```
 
+For Codex: `codex plugin marketplace add fivetaku/gptaku_plugins`, then `codex plugin add insane-review@gptaku-plugins`.
+
 ### 3. Restart Claude Code
 
 Required for the plugin to load.

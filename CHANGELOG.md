@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0 — 2026-11-23
+- Codex에서도 같은 스킬로 동작. 환경 점검(`--ensure-env`)·온보딩·`--harvest` 회수 절차를 SKILL.md로 옮겨 커맨드가 없어도 스킬만으로 실행된다. 커맨드는 첫 실행 설정과 인자 전달만 맡는다.
+- Codex 질문 도구 순서·경로 처리를 `references/codex.md`에 정리. Claude Code 동작과 추론 강도 정책(기본 Pro, 명시값 우선)은 그대로다.
+
 ## 0.7.0 — 2026-11-22
 - Severity-ordered review prompt with file:line and confidence
 - Local re-verification of each finding

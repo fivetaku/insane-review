@@ -15,11 +15,24 @@ description: GPT Pro(웹 전용·API 없음 — 현 시점 최신 플래그십 �
 
 핵심 가치는 "통째 패킹"이 아니라 **"의도 파악 → 관련 타겟만 정밀 선별 → 그것만 패킹"** 이다. 이 선별을 Claude(너)가 수행하는 것이 이 도구의 차별점이다.
 
+## 실행 환경 (Claude Code / Codex)
+
+- **Claude Code**: 선택지는 `AskUserQuestion`으로 묻는다. 스크립트 경로는 `${CLAUDE_PLUGIN_ROOT}`(아래 `<plugin>`과 같다).
+- **Codex**: 시작 전에 이 폴더의 `references/codex.md`를 읽는다. async 호출 형식: `{"questions":[{"title":"헤더 — 질문","options":["추천안 (추천) — 설명","대안 — 설명"]}]}` — 문항에는 `title`·`options`(문자열 배열)만, `question`·`header`·`id`는 넣지 않는다.
+- Codex에서는 `${CLAUDE_PLUGIN_ROOT}`(이 스킬이 읽으라는 `references/onboarding.md` 안의 것 포함)를 이 플러그인 루트(이 SKILL.md에서 두 단계 위 폴더)로 바꿔 읽는다.
+- `references/…` 경로는 이 SKILL.md가 있는 폴더 기준이다.
+
 ## 선행 조건 — 선택지 기반 온보딩 (사용자에게 CLI 타이핑 금지)
 
 **커맨드 Step 0.5가 이걸 자동화한다.** Claude가 `--ensure-env`를 직접 돌려 마지막 `STATUS node=… deps=… browser=… login=…`을
 파싱하고, 전부 ok가 아닐 때만 `references/onboarding.md`의 분기대로 **AskUserQuestion 선택지**로 물어본 뒤 Claude가 대신 실행한다.
 아래는 각 항목의 배경 설명이다.
+
+**환경 점검 (리뷰 실행 전 매번)** — 사용자에게 시키지 말고 직접 실행한다:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/pack_and_ask.py" --ensure-env
+```
+마지막 줄 `STATUS node=… deps=… browser=… login=… …`이 전부 ok면 바로 핵심 절차로 간다. **하나라도 ok가 아닐 때만** `references/onboarding.md`를 읽고 그 분기대로 선택지 질문으로 해결한다.
 
 - **deps**(`playwright`·`pyperclip`): 없으면 "지금 자동 설치" 선택 → `--check-env --install`. (`npx`/repomix는 `npx -y`로 완전 자동.)
 - **browser**: 크로미움 계열 브라우저가 디버그포트(9222)에 **전용 프로필**로 떠 있어야 함(주 브라우저와 격리; Chrome 136+는 전용 프로필 없으면 CDP가 안 열림). 없으면 `--check-env`의 `BROWSERS …` 목록으로 브라우저를 고르게 한 뒤 Claude가 `pack_and_ask.py --launch-browser "<이름>"`(크로스플랫폼 mac/win/linux·전용 프로필·선택 자동 저장)을 실행. 1개뿐이면 전용 브라우저 1개 설치를 권장. (쿠키는 전용 프로필에 보존 → 로그인 유지.)
@@ -33,7 +46,7 @@ description: GPT Pro(웹 전용·API 없음 — 현 시점 최신 플래그십 �
 ## 핵심 절차 (검토/수정/리뷰 요청을 받았을 때)
 
 ### 1) 의도 파악
-사용자가 GPT Pro에게 **무엇을** 묻고 싶은지 한 문장으로 정리한다. (버그 원인? 설계 리뷰? 리팩터 방향? 특정 함수 검증?)
+사용자가 GPT Pro에게 **무엇을** 묻고 싶은지 한 문장으로 정리한다. (버그 원인? 설계 리뷰? 리팩터 방향? 특정 함수 검증?) 타겟/범위가 애매하면 타이핑을 요구하지 말고 선택지 질문으로 고르게 한다(예: header `리뷰 대상`, 후보 디렉토리들 + "프로젝트 전체" + "질문만(코드 없이)").
 
 ### 2) 타겟 선별 — **완전한 관련 집합을 네가(Claude) 판단** (사용자가 누락을 잡아주는 구조면 안 된다)
 "repomix로 무엇을 넣을지 = 무엇이 완전한 관련 집합인지", "repomix만으로 충분한지 vs 관련 파일을 다 넣어야 하는지"의 **판단은 네 책임**이다. 기본은 **"넓게, 빠짐없이"**:
@@ -79,6 +92,13 @@ python3 <plugin>/bin/pack_and_ask.py --effort pro --force-answer-after 90 \
   - `반박됨` — 인용이 실제 코드와 다르거나, 다른 곳의 가드·조건 때문에 시나리오가 성립하지 않는다.
   - `미확인` — 패킹 밖 코드·런타임 상태에 달려 있어 로컬에서 판정할 수 없다(무엇을 보면 판정되는지 한 줄).
 - **보고**: 조치 대상으로는 `확인됨`만 심각도 순으로 제시한다. `반박됨`은 근거 한 줄씩 짧게 목록으로만, `미확인`은 다음에 확인할 것과 함께 따로 둔다. 응답이 "발견 없음"이라고 한 심각도는 그대로 전한다.
+
+### 4.5) 타임아웃·중단 뒤 회수 — `--harvest`
+전송은 됐는데 회수를 못 한 경우(최대 대기 초과·프로세스 사망·사용량 한도) **재전송하지 마라**(중복 채팅·Pro 쿼터 낭비). 실패 메시지의 결속 대화 URL 또는 `.insane-review/manifest_*.json`으로 완료된 응답만 회수한다:
+```bash
+python3 <plugin>/bin/pack_and_ask.py --harvest '<채팅URL 또는 manifest 경로>'
+```
+사용량 한도로 멈췄으면 한도 해제 후 같은 명령을 다시 돌린다.
 
 ## 주의/가드 (실측 기반)
 
